@@ -74,7 +74,7 @@ export default function ControlPanel({
 
   return (
     <Box className="control-panel">
-      <ScrollArea style={{ height: 'calc(100vh - 300px)' }}>
+      <ScrollArea className="control-panel-scroll" type="auto">
         <Box p="4">
           <Flex justify="between" align="center" mb="3">
             <Heading size="4">{t.poseControls}</Heading>

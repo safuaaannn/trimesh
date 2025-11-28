@@ -461,11 +461,13 @@ function App() {
   }, [rigData])
 
   const t = translations[language]
+  const currentYear = new Date().getFullYear()
 
   return (
     <LanguageContext.Provider value={language}>
-      <Flex className="app-container" gap="0" style={{ width: '100%', height: '100vh' }}>
-        <Box className="left-panel">
+      <div className="app-shell">
+        <Flex className="app-container" gap="0">
+          <Box className="left-panel">
           <UploadPanel
             onUpload={handleImageUpload}
             loading={loading}
@@ -493,48 +495,56 @@ function App() {
               language={language}
             />
           )}
-        </Box>
+          </Box>
 
-        <Box className="right-panel">
-          <div className="viewer-stage">
-            <ViewerPanel
-              allRigData={rigData?.rig_data}
-              selectedPerson={selectedPerson}
-              onPersonSelect={setSelectedPerson}
-              jointRotations={currentJointRotations}
-              jointRotationsByPerson={jointRotationsByPerson}
-              showJoints={showJoints}
-              language={language}
-            />
+          <Box className="right-panel">
+            <div className="viewer-stage">
+              <ViewerPanel
+                allRigData={rigData?.rig_data}
+                selectedPerson={selectedPerson}
+                onPersonSelect={setSelectedPerson}
+                jointRotations={currentJointRotations}
+                jointRotationsByPerson={jointRotationsByPerson}
+                showJoints={showJoints}
+                language={language}
+              />
 
-            {rigData && (
-              <div className="viewer-toolbar">
-                <Button
-                  size="2"
-                  variant={isMeasurementOverlayOpen ? 'solid' : 'surface'}
-                  onClick={() => handleToggleMeasurementOverlay()}
-                >
-                  {t.measurementPanel.openButton}
-                </Button>
-              </div>
-            )}
+              {rigData && (
+                <div className="viewer-toolbar">
+                  <Button
+                    size="2"
+                    variant={isMeasurementOverlayOpen ? 'solid' : 'surface'}
+                    onClick={() => handleToggleMeasurementOverlay()}
+                  >
+                    {t.measurementPanel.openButton}
+                  </Button>
+                </div>
+              )}
 
-            <MeasurementOverlay
-              language={language}
-              selectedPerson={selectedPerson}
-              visible={isMeasurementOverlayOpen}
-              onClose={() => handleToggleMeasurementOverlay(false)}
-              measurementData={currentMeasurement}
-              measurementError={measurementError}
-              measurementLoading={measurementLoading}
-              targetHeightValue={targetHeightValue}
-              onTargetHeightChange={(value) => handleMeasurementHeightChange(selectedPerson, value)}
-              onApply={(value) => handleMeasurementApply(selectedPerson, value)}
-              onExport={handleMeasurementExport}
-            />
-          </div>
-        </Box>
-      </Flex>
+              <MeasurementOverlay
+                language={language}
+                selectedPerson={selectedPerson}
+                visible={isMeasurementOverlayOpen}
+                onClose={() => handleToggleMeasurementOverlay(false)}
+                measurementData={currentMeasurement}
+                measurementError={measurementError}
+                measurementLoading={measurementLoading}
+                targetHeightValue={targetHeightValue}
+                onTargetHeightChange={(value) => handleMeasurementHeightChange(selectedPerson, value)}
+                onApply={(value) => handleMeasurementApply(selectedPerson, value)}
+                onExport={handleMeasurementExport}
+              />
+            </div>
+          </Box>
+        </Flex>
+        <footer className="site-footer">
+          <span>© {currentYear} 小白客 · 版权所有</span>
+          <span className="footer-links">
+            友情链接：
+            <a href="https://www.asmo.top/home" target="_blank" rel="noreferrer">杂货铺</a>
+          </span>
+        </footer>
+      </div>
     </LanguageContext.Provider>
   )
 }

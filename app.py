@@ -5,7 +5,7 @@ import uuid
 from collections import defaultdict
 from pathlib import Path
 from queue import Queue
-from threading import Lock, Thread
+from threading import Thread
 
 import cv2
 import numpy as np
@@ -16,6 +16,7 @@ from werkzeug.utils import secure_filename
 from notebook.utils import setup_sam_3d_body
 from sam_3d_body.metadata.mhr70 import pose_info as mhr70_pose_info
 from sam_3d_body.measurements import compute_measurements, MeasurementError
+from session_store import SQLiteSessionStore
 
 app = Flask(__name__, static_folder='frontend/dist')
 CORS(app)
@@ -294,8 +295,8 @@ def export_rigged_models(predictions, faces, rig_template, export_dir="meshes"):
 # ---------------------------------------------------------------------------
 estimator = None
 RIG_TEMPLATE = None
-SESSION_STORE = {}
-SESSION_LOCK = Lock()
+SESSION_DB_PATH = Path(os.environ.get("SESSION_DB_PATH", "data/session_store.db"))
+SESSION_STORE = SQLiteSessionStore(SESSION_DB_PATH)
 PROCESS_QUEUE = Queue()
 WORKER_THREAD = None
 
@@ -381,34 +382,25 @@ def allowed_file(filename):
 
 
 def register_session(session_id, filepath, session_dir, original_filename):
-    with SESSION_LOCK:
-        SESSION_STORE[session_id] = {
-            "session_id": session_id,
-            "status": "queued",
-            "created_at": time.time(),
-            "updated_at": time.time(),
-            "filepath": str(filepath),
-            "session_dir": str(session_dir),
-            "original_filename": original_filename,
-            "num_persons": 0,
-            "rig_data": None,
-            "error": None,
-        }
+    return SESSION_STORE.register_session(
+        session_id=session_id,
+        filepath=str(filepath),
+        session_dir=str(session_dir),
+        original_filename=original_filename,
+    )
 
 
 def update_session(session_id, **kwargs):
-    with SESSION_LOCK:
-        session = SESSION_STORE.get(session_id)
-        if not session:
-            return None
-        session.update(kwargs)
-        session["updated_at"] = time.time()
-        return session
+    return SESSION_STORE.update_session(session_id, **kwargs)
+
+
+def get_session(session_id):
+    return SESSION_STORE.get_session(session_id)
 
 
 def process_session_job(session_id):
     """Background worker that performs long-running inference."""
-    session = SESSION_STORE.get(session_id)
+    session = get_session(session_id)
     if not session:
         print(f"[Worker] Missing session {session_id}")
         return
@@ -514,7 +506,7 @@ def process_image():
 
 @app.route('/api/sessions/<session_id>', methods=['GET'])
 def get_session_status(session_id):
-    session = SESSION_STORE.get(session_id)
+    session = get_session(session_id)
     if not session:
         return jsonify({"error": "Session not found"}), 404
 
@@ -553,7 +545,7 @@ def calculate_measurements():
     if not session_id:
         return jsonify({"error": "Missing session_id"}), 400
 
-    session = SESSION_STORE.get(session_id)
+    session = get_session(session_id)
     if not session:
         return jsonify({"error": "Session not found"}), 404
 

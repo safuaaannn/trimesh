@@ -140,6 +140,13 @@ python app.py
 
 3. **Access the app** at `http://localhost:5000`
 
+## Session Persistence
+
+- The backend now stores session metadata in a lightweight SQLite database located at `data/session_store.db`. This allows you to restart the Flask server without losing completed session results.
+- Set `SESSION_DB_PATH=/custom/path.db` (use `set` on Windows) before launching `app.py` if you want to store the database elsewhere.
+- Remove the database file if you need to fully reset the session history.
+- Sessions that were `queued` or `processing` when the server stopped are preserved, but their jobs need to be re-uploaded because the background worker only runs on new requests.
+
 ## How to Use
 
 1. **Upload an Image**
