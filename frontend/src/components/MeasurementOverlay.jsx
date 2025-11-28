@@ -192,20 +192,22 @@ export default function MeasurementOverlay({
                   const unit = unitSymbol(t, meta.unit)
                   const hasValue = typeof value === 'number' && Number.isFinite(value)
                   return (
-                    <Table.Row key={key}>
+                    <Table.Row key={key} className="measurement-panel__row">
                       <Table.Cell>
-                        <Text weight="medium">{label}</Text>
+                        <Text weight="medium" className="measurement-panel__label">
+                          {label}
+                        </Text>
                         {description && (
-                          <Text as="p" size="1" color="gray">
+                          <Text as="p" size="1" color="gray" className="measurement-panel__description">
                             {description}
                           </Text>
                         )}
                       </Table.Cell>
                       <Table.Cell align="right">
-                        <Text weight="bold">
-                          {formatValue(value, meta.unit)}
-                          {hasValue && <span className="measurement-panel__unit"> {unit}</span>}
-                        </Text>
+                        <div className="measurement-panel__value">
+                          <Text weight="bold">{formatValue(value, meta.unit)}</Text>
+                          {hasValue && <span className="measurement-panel__unit">{unit}</span>}
+                        </div>
                       </Table.Cell>
                     </Table.Row>
                   )

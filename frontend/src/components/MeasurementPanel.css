@@ -123,6 +123,27 @@
   width: 100%;
 }
 
+.measurement-panel__row {
+  border-bottom: 1px solid rgba(255, 255, 255, 0.05);
+}
+
+.measurement-panel__label {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 6px;
+}
+
+.measurement-panel__description {
+  margin-top: 4px;
+  line-height: 1.5;
+}
+
+.measurement-panel__value {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 6px;
+}
+
 .measurement-panel__table-wrapper {
   flex: 1;
   max-height: 320px;
@@ -139,8 +160,9 @@
 }
 
 .measurement-panel__unit {
-  font-size: 12px;
+  font-size: 0.85rem;
   color: var(--gray-11);
+  white-space: nowrap;
 }
 
 /* Scrollbar styling for better UX */
