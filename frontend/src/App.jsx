@@ -4,6 +4,7 @@ import UploadPanel from './components/UploadPanel'
 import ViewerPanel from './components/ViewerPanel'
 import ControlPanel from './components/ControlPanel'
 import MeasurementOverlay from './components/MeasurementOverlay'
+import IntroAnimation from './components/IntroAnimation'
 import { translations } from './i18n'
 import './App.css'
 
@@ -51,6 +52,7 @@ function App() {
   const [measurementLoading, setMeasurementLoading] = useState(false)
   const [measurementError, setMeasurementError] = useState(null)
   const [isMeasurementOverlayOpen, setIsMeasurementOverlayOpen] = useState(false)
+  const [showIntro, setShowIntro] = useState(true)
   const pollAttemptRef = useRef(0)
 
   const persistSessionState = useCallback((payload) => {
@@ -463,8 +465,13 @@ function App() {
   const t = translations[language]
   const currentYear = new Date().getFullYear()
 
+  const handleIntroComplete = useCallback(() => {
+    setShowIntro(false)
+  }, [])
+
   return (
     <LanguageContext.Provider value={language}>
+      {showIntro && <IntroAnimation onComplete={handleIntroComplete} />}
       <div className="app-shell">
         <Flex className="app-container" gap="0">
           <Box className="left-panel">
