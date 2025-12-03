@@ -1,0 +1,39 @@
+version: '3.8'
+
+services:
+  sam-3d-body:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: sam-3d-body:latest
+    container_name: sam-3d-body-app
+    ports:
+      - "5000:5000"
+    volumes:
+      # 持久化上传的文件和输出结果
+      - ./uploads:/app/uploads
+      - ./outputs:/app/outputs
+      - ./data:/app/data
+      # 可选: 如果需要持久化模型缓存（避免每次重新下载）
+      # - ~/.cache/huggingface:/root/.cache/huggingface
+    environment:
+      - LIGHTWEIGHT_MODE=false
+      - SESSION_DB_PATH=/app/data/session_store.db
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:5000/api/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 120s
+
+
+
+
