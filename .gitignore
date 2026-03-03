@@ -93,11 +93,18 @@ dist-ssr
 # Project specific
 uploads/
 outputs/
+data/
 *.pth
 *.ckpt
 *.pt
 *.h5
 *.pb
+*.pkl
+*.obj
+*.ply
+*.npz
+*.npy
+*.bin
 checkpoints/
 models/
 *.onnx

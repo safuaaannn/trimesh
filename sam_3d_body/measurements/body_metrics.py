@@ -140,6 +140,569 @@ def _perimeter_from_points(points: np.ndarray) -> Optional[float]:
     return float(np.linalg.norm(hull - shifted, axis=1).sum())
 
 
+def _slab_at_plane(vertices: np.ndarray, plane_origin: np.ndarray, plane_normal: np.ndarray, thickness: float) -> np.ndarray:
+    """Select vertices within ±thickness of the given plane."""
+    n = np.asarray(plane_normal, dtype=float)
+    n = n / (np.linalg.norm(n) + 1e-9)
+    signed_dist = (vertices - np.asarray(plane_origin)) @ n
+    return vertices[np.abs(signed_dist) <= thickness]
+
+
+def _exclude_arms_xz(pts_3d: np.ndarray, chest_midpoint_3d: np.ndarray, arm_gap_m: float = 0.22) -> np.ndarray:
+    """
+    Remove arm cross-sections from a chest/torso slice.
+    Keeps only points within arm_gap_m of the chest centre in the XZ plane.
+
+    arm_gap_m = 0.22 m covers most adult chest half-widths with margin.
+    Decrease to 0.18 if arms still bleed in; increase to 0.26 if the
+    chest sides are being clipped.
+    """
+    midpoint_xz = np.array([chest_midpoint_3d[0], chest_midpoint_3d[2]])
+    dist = np.linalg.norm(pts_3d[:, [0, 2]] - midpoint_xz, axis=1)
+    return pts_3d[dist <= arm_gap_m]
+
+
+def _trimesh_plane_slice(
+    vertices: np.ndarray,
+    faces: np.ndarray,
+    plane_origin: np.ndarray,
+    plane_normal: np.ndarray,
+) -> Optional[np.ndarray]:
+    """Exact trimesh intersection for a tilted plane. Returns (N,3) points or None."""
+    try:
+        import trimesh
+        mesh = trimesh.Trimesh(vertices=vertices, faces=faces, process=False)
+        segments = trimesh.intersections.mesh_plane(mesh, plane_normal, plane_origin)
+        if segments is None or len(segments) == 0:
+            return None
+        return segments.reshape(-1, 3)
+    except Exception:
+        return None
+
+
+def _build_contours_from_segments(segments: np.ndarray, eps: float = 1e-4) -> List[np.ndarray]:
+    """
+    Stitch trimesh intersection segments (K, 2, 3) into ordered closed contours.
+
+    trimesh.intersections.mesh_plane returns one closed loop per body-part
+    cross-section (torso, left arm, right arm, …).  This function reconstructs
+    those loops as ordered vertex arrays so we can measure each one separately.
+
+    Returns a list of (M_i, 3) arrays, one per contour, largest first.
+    """
+    n = len(segments)
+    if n == 0:
+        return []
+
+    # Hash each endpoint to a grid cell for O(1) neighbour lookup
+    scale = 1.0 / max(eps, 1e-9)
+
+    def _key(pt: np.ndarray):
+        return (int(round(pt[0] * scale)),
+                int(round(pt[1] * scale)),
+                int(round(pt[2] * scale)))
+
+    # endpoint_map: grid_key -> list of (segment_idx, which_end {0 or 1})
+    endpoint_map: Dict[tuple, List] = {}
+    for i in range(n):
+        for e in (0, 1):
+            k = _key(segments[i, e])
+            if k not in endpoint_map:
+                endpoint_map[k] = []
+            endpoint_map[k].append((i, e))
+
+    used = np.zeros(n, dtype=bool)
+    contours: List[np.ndarray] = []
+
+    for start in range(n):
+        if used[start]:
+            continue
+        used[start] = True
+        pts = [segments[start, 0].copy(), segments[start, 1].copy()]
+
+        # Walk the chain until we can no longer extend
+        for _ in range(n):
+            tail_key = _key(pts[-1])
+            found = False
+            for seg_idx, ep_idx in endpoint_map.get(tail_key, []):
+                if used[seg_idx]:
+                    continue
+                # Connect: other endpoint of this segment
+                next_pt = segments[seg_idx, 1 - ep_idx].copy()
+                pts.append(next_pt)
+                used[seg_idx] = True
+                found = True
+                break
+            if not found:
+                break
+
+        if len(pts) >= 3:
+            contours.append(np.array(pts, dtype=float))
+
+    # Sort largest first (most segments = main torso ring)
+    contours.sort(key=len, reverse=True)
+    return contours
+
+
+def _trimesh_chest_contour(
+    vertices: np.ndarray,
+    faces: np.ndarray,
+    plane_origin: np.ndarray,
+    plane_normal: np.ndarray,
+    chest_center_3d: np.ndarray,
+    exclusion_xz: Optional[List[np.ndarray]] = None,
+    exclusion_radius: float = 0.08,
+) -> Optional[np.ndarray]:
+    """
+    Slice the mesh with the plane using trimesh and return the ordered 3-D
+    contour of the torso ring (the closed loop nearest to chest_center_3d).
+
+    exclusion_xz : list of (x, z) 1-D arrays — XZ positions of wrist/arm
+                   joints used to dynamically compute the torso protection zone.
+                   Any segment whose XZ midpoint is farther from the body
+                   centre than (82 % of the wrist-to-centre distance) is
+                   dropped BEFORE contour stitching.  This keeps ALL torso
+                   segments (which are always within ~75 % of the wrist
+                   distance) while discarding arm cross-sections that sit
+                   beyond that boundary.  Works for any body size because the
+                   threshold scales with the actual wrist position.
+    exclusion_radius : fallback arm-column radius (metres) used only for
+                       segments that lie between the torso zone and the wrist.
+
+    Returns (M, 3) ordered ring vertices, or None on failure.
+    """
+    try:
+        import trimesh
+        mesh = trimesh.Trimesh(vertices=vertices, faces=faces, process=False)
+        segments = trimesh.intersections.mesh_plane(mesh, plane_normal, plane_origin)
+        if segments is None or len(segments) < 3:
+            return None
+
+        # ── Arm / hand segment exclusion ─────────────────────────────────────
+        # Strategy: keep every segment whose XZ midpoint is within 82 % of the
+        # minimum wrist-to-centre distance (the "torso safe zone").  Segments
+        # outside that zone are excluded only if they are also within
+        # exclusion_radius of a wrist joint.  This two-tier check prevents the
+        # fixed exclusion radius from accidentally clipping the torso sides
+        # (the failure mode that produced half-circumference rings).
+        if exclusion_xz:
+            body_center_xz = np.array([chest_center_3d[0], chest_center_3d[2]])
+            min_wrist_dist = min(
+                float(np.linalg.norm(ex - body_center_xz)) for ex in exclusion_xz
+            )
+            torso_safe_radius = min_wrist_dist * 0.82  # always inside the arm column
+
+            keep = []
+            for seg in segments:
+                mid_xz = np.array([(seg[0, 0] + seg[1, 0]) / 2.0,
+                                   (seg[0, 2] + seg[1, 2]) / 2.0])
+                dist_to_center = float(np.linalg.norm(mid_xz - body_center_xz))
+
+                # Torso zone: always keep — never clip here
+                if dist_to_center <= torso_safe_radius:
+                    keep.append(seg)
+                    continue
+
+                # Outside torso zone: exclude only if near a wrist/arm joint
+                in_arm = any(
+                    float(np.linalg.norm(mid_xz - ex)) < exclusion_radius
+                    for ex in exclusion_xz
+                )
+                if not in_arm:
+                    keep.append(seg)
+
+            if not keep:
+                return None
+            segments = np.array(keep, dtype=float)
+
+        contours = _build_contours_from_segments(segments)
+        if not contours:
+            return None
+
+        # Pick the contour whose centroid is closest to the known chest centre
+        best: Optional[np.ndarray] = None
+        best_dist = float('inf')
+        for c in contours:
+            d = float(np.linalg.norm(c.mean(axis=0) - chest_center_3d))
+            if d < best_dist:
+                best_dist = d
+                best = c
+
+        return best if (best is not None and len(best) >= 3) else None
+    except Exception:
+        return None
+
+
+def _chest_circumference_smplx_style(
+    vertices: np.ndarray,
+    faces: Optional[np.ndarray],
+    left_chest_idx: int,
+    right_chest_idx: int,
+    pelvis_joint: Optional[np.ndarray] = None,
+    spine_joint: Optional[np.ndarray] = None,
+    left_wrist_joint: Optional[np.ndarray] = None,
+    right_wrist_joint: Optional[np.ndarray] = None,
+    thickness: float = 0.025,
+    arm_gap_m: float = 0.22,
+) -> Tuple[float, np.ndarray]:
+    """
+    Compute full chest circumference using the SMPLX-style landmark-anchored
+    approach.
+
+    Strategy
+    --------
+    1. Plane origin  = midpoint of the two chest landmark vertices.
+    2. Plane normal  = spine axis (pelvis→spine2) or world-Y fallback.
+    3. Trimesh exact slice → arm segments excluded via wrist-joint 2-tier gate
+       → pick the torso contour nearest to the chest centre.
+    4. Perimeter = sum of segment lengths along the ordered ring (exact).
+    5. Fallback: vertex slab + _exclude_arms_xz gate + convex hull.
+
+    Returns (girth_metres, ring_3d) where ring_3d is (M, 3) ordered ring
+    vertices for Three.js visualisation (empty array on fallback path).
+    """
+    vertices = np.asarray(vertices, dtype=float)
+
+    left_pt = vertices[left_chest_idx]
+    right_pt = vertices[right_chest_idx]
+    plane_origin = (left_pt + right_pt) / 2.0  # front-of-chest midpoint
+
+    # Chest girth is always measured horizontally (like a tape measure),
+    # regardless of body posture. The plane ORIGIN is already anchored to
+    # the correct height via the chest landmark vertices — world-Y normal
+    # gives the cleanest horizontal cut and avoids tilt from a leaning spine.
+    plane_normal = np.array([0.0, 1.0, 0.0])
+
+    # Build wrist exclusion zones (same 2-tier logic used by waist)
+    _excl_xz: Optional[List[np.ndarray]] = None
+    _wrist_pts = [w for w in (left_wrist_joint, right_wrist_joint) if w is not None]
+    if _wrist_pts:
+        _excl_xz = [np.array([float(np.asarray(w, dtype=float)[0]),
+                               float(np.asarray(w, dtype=float)[2])]) for w in _wrist_pts]
+
+    # ── TRIMESH PATH (preferred) ──────────────────────────────────────────────
+    if faces is not None:
+        ring_3d = _trimesh_chest_contour(
+            vertices, faces, plane_origin, plane_normal, plane_origin,
+            exclusion_xz=_excl_xz,
+        )
+        if ring_3d is not None and len(ring_3d) >= 3:
+            # Perimeter = sum of consecutive distances along the ordered ring
+            diffs = np.diff(ring_3d, axis=0)
+            girth_m = float(np.linalg.norm(diffs, axis=1).sum())
+            # Close the loop
+            close_diff = np.linalg.norm(ring_3d[-1] - ring_3d[0])
+            girth_m += close_diff
+            return girth_m, ring_3d
+
+    # ── FALLBACK: vertex slab + arm exclusion + convex hull ───────────────────
+    dominant = int(np.argmax(np.abs(plane_normal)))
+    keep = [i for i in range(3) if i != dominant]
+
+    t = thickness
+    pts: Optional[np.ndarray] = None
+    for _ in range(4):
+        pts = _slab_at_plane(vertices, plane_origin, plane_normal, t)
+        if pts is not None and len(pts) >= 12:
+            break
+        t *= 1.5
+
+    if pts is not None and len(pts) >= 4:
+        # Apply arm exclusion: wrist-based dynamic gate if available,
+        # else fall back to the fixed arm_gap_m XZ radius from chest centre.
+        if _excl_xz:
+            body_center_xz = np.array([plane_origin[0], plane_origin[2]])
+            min_wrist_dist = min(np.linalg.norm(ex - body_center_xz) for ex in _excl_xz)
+            max_torso_r = min_wrist_dist * 0.82
+            pts = pts[np.linalg.norm(pts[:, [0, 2]] - body_center_xz, axis=1) <= max_torso_r]
+        else:
+            pts = _exclude_arms_xz(pts, plane_origin, arm_gap_m)
+
+    if pts is not None and len(pts) >= 4:
+        pts_2d = pts[:, keep]
+        hull_2d = _convex_hull(pts_2d)
+        if hull_2d is not None and len(hull_2d) >= 3:
+            shifted = np.roll(hull_2d, -1, axis=0)
+            girth_m = float(np.linalg.norm(hull_2d - shifted, axis=1).sum())
+            avg_n = float(np.mean(pts[:, dominant]))
+            hull_3d = np.zeros((len(hull_2d), 3), dtype=float)
+            for i, ax in enumerate(keep):
+                hull_3d[:, ax] = hull_2d[:, i]
+            hull_3d[:, dominant] = avg_n
+            return girth_m, hull_3d
+
+    # Last-resort: Ramanujan ellipse from bounding box
+    if pts is not None and len(pts) >= 2:
+        pts_2d = pts[:, keep]
+        w = float(pts_2d[:, 0].max() - pts_2d[:, 0].min())
+        d = float(pts_2d[:, 1].max() - pts_2d[:, 1].min())
+    else:
+        w, d = 0.30, 0.20
+    a, b = max(w, d) / 2, min(w, d) / 2
+    h = ((a - b) / (a + b)) ** 2
+    girth_m = math.pi * (a + b) * (1 + 3 * h / (10 + math.sqrt(4 - 3 * h)))
+    return girth_m, np.zeros((0, 3), dtype=float)
+
+
+def _waist_circumference_smplx_style(
+    vertices: np.ndarray,
+    faces: Optional[np.ndarray],
+    belly_button_idx: int,
+    back_belly_button_idx: int,
+    pelvis_joint: Optional[np.ndarray] = None,
+    spine3_joint: Optional[np.ndarray] = None,
+    left_wrist_joint: Optional[np.ndarray] = None,
+    right_wrist_joint: Optional[np.ndarray] = None,
+    thickness: float = 0.020,
+) -> Tuple[float, np.ndarray]:
+    """
+    SMPLX-style waist circumference — sagittal landmark anchor + spine3 tilt.
+
+    Differences from the chest implementation
+    -----------------------------------------
+    Anchor axis:   FRONT ↔ BACK  (belly_button ↔ back_belly, sagittal)
+                   vs. LEFT ↔ RIGHT for chest (bilateral)
+    Plane normal:  pelvis → spine3  (waist level, tighter pelvic-tilt correction)
+                   vs. pelvis → spine2/neck for chest
+    Hand exclusion: _trimesh_chest_contour picks the contour nearest the waist
+                   centre — hand/wrist blobs form separate disconnected loops
+                   and are automatically discarded (same mechanism as chest).
+                   At waist height only hands reach the cross-section (not upper
+                   arms), so the contour-selection approach is sufficient without
+                   a hard XZ radius gate.
+
+    Steps
+    -----
+    1. plane_origin = midpoint(belly_button_vertex, back_belly_button_vertex)
+    2. plane_normal = (pelvis_joint - spine3_joint) normalised, or world-Y
+    3. trimesh exact slice → _trimesh_chest_contour selects torso ring
+    4. girth = sum of consecutive segment lengths (closed loop)
+    5. Fallback: slab + convex hull + 0.28 m outer XZ gate
+
+    Returns (girth_metres, ring_3d).
+    """
+    vertices = np.asarray(vertices, dtype=float)
+
+    front_pt = vertices[belly_button_idx]
+    back_pt = vertices[back_belly_button_idx]
+    plane_origin = (front_pt + back_pt) / 2.0
+
+    # Plane normal: pelvis → spine3 vector accounts for pelvic tilt at waist.
+    # Direction follows the prompt spec: pelvis_joint - spine3_joint.
+    # (Opposite sign to chest; trimesh intersection is direction-agnostic.)
+    if pelvis_joint is not None and spine3_joint is not None:
+        raw = np.asarray(pelvis_joint, dtype=float) - np.asarray(spine3_joint, dtype=float)
+        norm_len = np.linalg.norm(raw)
+        plane_normal = raw / (norm_len + 1e-9) if norm_len > 1e-9 else np.array([0.0, 1.0, 0.0])
+    else:
+        plane_normal = np.array([0.0, 1.0, 0.0])
+
+    # Build wrist exclusion zones for arm segment filtering
+    _excl_xz: Optional[List[np.ndarray]] = None
+    _wrist_pts = [w for w in (left_wrist_joint, right_wrist_joint) if w is not None]
+    if _wrist_pts:
+        _excl_xz = [np.array([np.asarray(w, dtype=float)[0],
+                               np.asarray(w, dtype=float)[2]]) for w in _wrist_pts]
+
+    # ── TRIMESH PATH (preferred) ──────────────────────────────────────────────
+    if faces is not None:
+        ring_3d = _trimesh_chest_contour(
+            vertices, faces, plane_origin, plane_normal, plane_origin,
+            exclusion_xz=_excl_xz,
+        )
+        if ring_3d is not None and len(ring_3d) >= 3:
+            diffs = np.diff(ring_3d, axis=0)
+            girth_m = float(np.linalg.norm(diffs, axis=1).sum())
+            girth_m += np.linalg.norm(ring_3d[-1] - ring_3d[0])
+            return girth_m, ring_3d
+
+    # ── FALLBACK: vertex slab + convex hull ───────────────────────────────────
+    dominant = int(np.argmax(np.abs(plane_normal)))
+    keep = [i for i in range(3) if i != dominant]
+
+    t = thickness
+    pts: Optional[np.ndarray] = None
+    for _ in range(4):
+        pts = _slab_at_plane(vertices, plane_origin, plane_normal, t)
+        if pts is not None and len(pts) >= 12:
+            break
+        t *= 1.5
+
+    if pts is not None and len(pts) >= 4:
+        # Same max-distance exclusion used in the trimesh path: only keep
+        # vertices within 82 % of the wrist-to-centre distance (torso zone).
+        # Fall back to the 0.28 m outer gate when wrists are unavailable.
+        if _excl_xz:
+            body_center_xz = np.array([plane_origin[0], plane_origin[2]])
+            min_wrist_dist = min(np.linalg.norm(ex - body_center_xz) for ex in _excl_xz)
+            max_torso_r = min_wrist_dist * 0.82
+            pts_dist = np.linalg.norm(pts[:, [0, 2]] - body_center_xz, axis=1)
+            pts = pts[pts_dist <= max_torso_r]
+        else:
+            waist_xz = np.array([plane_origin[0], plane_origin[2]])
+            pts = pts[np.linalg.norm(pts[:, [0, 2]] - waist_xz, axis=1) <= 0.28]
+
+        if len(pts) >= 4:
+            pts_2d = pts[:, keep]
+            hull_2d = _convex_hull(pts_2d)
+            if hull_2d is not None and len(hull_2d) >= 3:
+                shifted = np.roll(hull_2d, -1, axis=0)
+                girth_m = float(np.linalg.norm(hull_2d - shifted, axis=1).sum())
+                avg_n = float(np.mean(pts[:, dominant]))
+                hull_3d = np.zeros((len(hull_2d), 3), dtype=float)
+                for i, ax in enumerate(keep):
+                    hull_3d[:, ax] = hull_2d[:, i]
+                hull_3d[:, dominant] = avg_n
+                return girth_m, hull_3d
+
+    # Last-resort: Ramanujan ellipse from bounding box
+    if pts is not None and len(pts) >= 2:
+        pts_2d = pts[:, keep]
+        w = float(pts_2d[:, 0].max() - pts_2d[:, 0].min())
+        d = float(pts_2d[:, 1].max() - pts_2d[:, 1].min())
+    else:
+        w, d = 0.24, 0.18
+    a, b = max(w, d) / 2, min(w, d) / 2
+    h = ((a - b) / (a + b)) ** 2
+    girth_m = math.pi * (a + b) * (1 + 3 * h / (10 + math.sqrt(4 - 3 * h)))
+    return girth_m, np.zeros((0, 3), dtype=float)
+
+
+def _find_pubic_bone_idx(
+    vertices: np.ndarray,
+    hip_level_y: float,
+    actual_height_m: float,
+) -> int:
+    """
+    Locate the MHR vertex closest to the pubic symphysis at runtime.
+
+    Search space (T/A-pose body):
+    - Y: [hip_level_y - 10 % of height, hip_level_y + 3 % of height]
+    - |X| < 0.07 m  (near centre-line, between the legs)
+    - Z: maximum (most frontal — max Z == front in MHR coordinate space)
+
+    Returns a valid vertex index; falls back to vertex 0 only if the mesh is
+    degenerate.
+    """
+    h = actual_height_m
+    y_lo = hip_level_y - 0.10 * h
+    y_hi = hip_level_y + 0.03 * h
+    mask = (
+        (vertices[:, 1] >= y_lo)
+        & (vertices[:, 1] <= y_hi)
+        & (np.abs(vertices[:, 0]) < 0.07)
+    )
+    idxs = np.where(mask)[0]
+    if len(idxs) == 0:
+        # Widen the band
+        mask2 = np.abs(vertices[:, 1] - hip_level_y) < 0.06 * h
+        idxs = np.where(mask2)[0]
+    if len(idxs) == 0:
+        return 0
+    return int(idxs[int(np.argmax(vertices[idxs, 2]))])
+
+
+def _hip_circumference_smplx_style(
+    vertices: np.ndarray,
+    faces: Optional[np.ndarray],
+    pubic_bone_idx: int,
+    pelvis_joint: Optional[np.ndarray] = None,
+    spine3_joint: Optional[np.ndarray] = None,
+    max_radius_m: float = 0.30,
+) -> Tuple[float, np.ndarray]:
+    """
+    SMPLX-style hip / seat girth measurement.
+
+    Plane origin  = pubic bone vertex (single landmark on body centreline).
+                    No midpoint averaging — the pubic bone is already at X≈0,
+                    Z≈0 of the pelvis, and its Y anchors the cut at the correct
+                    anatomical hip fullness level (below the hip joint).
+
+    Plane normal  = pelvis → spine3 (same joint pair as waist, same direction).
+                    The CUTTING HEIGHT differs from waist only because the plane
+                    ORIGIN is lower (pubic bone < belly-button midpoint), not
+                    because the normal changes.
+
+    No extremity exclusion — at pubic-bone Y, hand cross-sections sit above
+    this level (hands hang at ~waist height in A-pose) and thigh tops form
+    separate contours below the ring; _trimesh_chest_contour's nearest-centroid
+    selection picks the correct hip ring without any explicit arm/leg gate.
+
+    Fallback: vertex slab + convex hull limited to max_radius_m from pubic bone.
+
+    Returns (girth_metres, ring_3d).
+    """
+    vertices = np.asarray(vertices, dtype=float)
+    plane_origin = vertices[pubic_bone_idx].copy()
+
+    # Plane normal: pelvis − spine3  (same direction as waist, not chest).
+    # trimesh intersection is direction-agnostic, but keeping the same sign
+    # convention as waist makes the normal consistent across measurements.
+    if pelvis_joint is not None and spine3_joint is not None:
+        raw = np.asarray(pelvis_joint, dtype=float) - np.asarray(spine3_joint, dtype=float)
+        norm_len = np.linalg.norm(raw)
+        plane_normal = raw / (norm_len + 1e-9) if norm_len > 1e-9 else np.array([0.0, 1.0, 0.0])
+    else:
+        plane_normal = np.array([0.0, 1.0, 0.0])
+
+    # ── TRIMESH PATH (preferred) — reuses chest contour function ─────────────
+    # No exclusion_xz: at pubic-bone height, arm cross-sections form separate
+    # loops (armpit gap present here unlike at waist); the nearest-centroid
+    # selector returns the hip ring without an explicit arm gate.
+    if faces is not None:
+        ring_3d = _trimesh_chest_contour(
+            vertices, faces, plane_origin, plane_normal, plane_origin
+        )
+        if ring_3d is not None and len(ring_3d) >= 3:
+            diffs = np.diff(ring_3d, axis=0)
+            girth_m = float(np.linalg.norm(diffs, axis=1).sum())
+            girth_m += float(np.linalg.norm(ring_3d[-1] - ring_3d[0]))
+            return girth_m, ring_3d
+
+    # ── FALLBACK: vertex slab + convex hull ───────────────────────────────────
+    dominant = int(np.argmax(np.abs(plane_normal)))
+    keep = [i for i in range(3) if i != dominant]
+
+    thickness = 0.025
+    pts: Optional[np.ndarray] = None
+    for _ in range(4):
+        pts = _slab_at_plane(vertices, plane_origin, plane_normal, thickness)
+        if pts is not None and len(pts) >= 12:
+            break
+        thickness *= 1.5
+
+    if pts is not None and len(pts) >= 4:
+        # XZ gate: keep only hip/pelvis region within max_radius_m of pubic bone.
+        # 0.30 m is wider than waist's 0.28 m — hip cross-section is broader.
+        hip_xz = np.array([plane_origin[0], plane_origin[2]])
+        pts = pts[np.linalg.norm(pts[:, [0, 2]] - hip_xz, axis=1) <= max_radius_m]
+
+    if pts is not None and len(pts) >= 4:
+        pts_2d = pts[:, keep]
+        hull_2d = _convex_hull(pts_2d)
+        if hull_2d is not None and len(hull_2d) >= 3:
+            shifted = np.roll(hull_2d, -1, axis=0)
+            girth_m = float(np.linalg.norm(hull_2d - shifted, axis=1).sum())
+            avg_n = float(np.mean(pts[:, dominant]))
+            hull_3d = np.zeros((len(hull_2d), 3), dtype=float)
+            for i, ax in enumerate(keep):
+                hull_3d[:, ax] = hull_2d[:, i]
+            hull_3d[:, dominant] = avg_n
+            return girth_m, hull_3d
+
+    # Last-resort: Ramanujan ellipse from bounding box
+    if pts is not None and len(pts) >= 2:
+        pts_2d = pts[:, keep]
+        w = float(pts_2d[:, 0].max() - pts_2d[:, 0].min())
+        d = float(pts_2d[:, 1].max() - pts_2d[:, 1].min())
+    else:
+        w, d = 0.42, 0.30
+    a, b = max(w, d) / 2, min(w, d) / 2
+    hv = ((a - b) / (a + b)) ** 2
+    girth_m = math.pi * (a + b) * (1 + 3 * hv / (10 + math.sqrt(4 - 3 * hv)))
+    return girth_m, np.zeros((0, 3), dtype=float)
+
+
 def _ellipse_perimeter(a: float, b: float) -> float:
     if a <= 0 or b <= 0:
         return 0.0
@@ -214,6 +777,150 @@ def _limb_girth(
     return _perimeter_from_points(selected)
 
 
+def _build_plane_axes(plane_normal: np.ndarray):
+    """Build two orthogonal unit vectors (u, v) on the cutting plane via Gram-Schmidt."""
+    n = np.asarray(plane_normal, dtype=float)
+    n = n / (np.linalg.norm(n) + 1e-9)
+    ref = np.array([0.0, 1.0, 0.0])
+    if abs(np.dot(n, ref)) > 0.9:
+        ref = np.array([1.0, 0.0, 0.0])
+    u = np.cross(n, ref)
+    u = u / (np.linalg.norm(u) + 1e-9)
+    v = np.cross(n, u)
+    v = v / (np.linalg.norm(v) + 1e-9)
+    return u, v
+
+
+def _isolate_single_thigh(
+    pts_3d: np.ndarray,
+    thigh_vertex_3d: np.ndarray,
+    hip_joint_3d: np.ndarray,
+    plane_u: np.ndarray,
+    plane_v: np.ndarray,
+    isolation_radius_m: float = 0.16,
+) -> np.ndarray:
+    """Keep only points from ONE thigh using a radial gate in the plane's UV space."""
+    if len(pts_3d) == 0:
+        return pts_3d
+
+    def to_uv(pt):
+        return np.array([np.dot(pt, plane_u), np.dot(pt, plane_v)])
+
+    centre_uv = (to_uv(thigh_vertex_3d) + to_uv(hip_joint_3d)) / 2.0
+    pts_uv = np.column_stack([pts_3d @ plane_u, pts_3d @ plane_v])
+    dist_2d = np.linalg.norm(pts_uv - centre_uv, axis=1)
+    return pts_3d[dist_2d <= isolation_radius_m]
+
+
+def _plane_hull_perimeter(pts_3d: np.ndarray, plane_u: np.ndarray, plane_v: np.ndarray) -> float:
+    """Project 3D cross-section points onto plane (u,v) axes and compute convex hull perimeter."""
+    if len(pts_3d) < 3:
+        return 0.0
+    pts_2d = np.column_stack([pts_3d @ plane_u, pts_3d @ plane_v])
+    if len(pts_2d) >= 4:
+        hull = _convex_hull(pts_2d)
+        if hull is None or len(hull) < 3:
+            return 0.0
+        shifted = np.roll(hull, -1, axis=0)
+        return float(np.linalg.norm(hull - shifted, axis=1).sum())
+    # Fallback: Ramanujan ellipse from bounding box
+    w = float(pts_2d[:, 0].max() - pts_2d[:, 0].min()) if len(pts_2d) > 1 else 0.20
+    d = float(pts_2d[:, 1].max() - pts_2d[:, 1].min()) if len(pts_2d) > 1 else 0.16
+    a, b = max(w, d) / 2, min(w, d) / 2
+    h = ((a - b) / (a + b)) ** 2
+    return math.pi * (a + b) * (1 + 3 * h / (10 + math.sqrt(4 - 3 * h)))
+
+
+def _thigh_circumference_smplx_style(
+    vertices: np.ndarray,
+    faces: Optional[np.ndarray],
+    thigh_vertex_idx: int,
+    hip_joint: Optional[np.ndarray],
+    knee_joint: Optional[np.ndarray],
+    spine3_joint: Optional[np.ndarray] = None,
+    thickness: float = 0.020,
+    isolation_radius_m: float = 0.16,
+):
+    """
+    Compute thigh circumference (raw metres) for ONE side, SMPLX-style.
+
+    Returns (girth_m, pts_3d) where pts_3d are the isolated cross-section points
+    used for ring visualisation.
+    """
+    vertices = np.asarray(vertices, dtype=float)
+    hip_joint = np.asarray(hip_joint, dtype=float) if hip_joint is not None else None
+    knee_joint = np.asarray(knee_joint, dtype=float) if knee_joint is not None else None
+    thigh_vertex = vertices[thigh_vertex_idx]
+
+    # A: Plane origin = thigh landmark vertex
+    plane_origin = thigh_vertex.copy()
+
+    # B: Plane normal = leg axis (spine3→knee preferred, hip→knee fallback, world-Y last)
+    if spine3_joint is not None and knee_joint is not None:
+        raw = np.asarray(spine3_joint, dtype=float) - knee_joint
+    elif hip_joint is not None and knee_joint is not None:
+        raw = hip_joint - knee_joint
+    else:
+        raw = np.array([0.0, 1.0, 0.0])
+    norm_len = np.linalg.norm(raw)
+    plane_normal = raw / norm_len if norm_len > 1e-6 else np.array([0.0, 1.0, 0.0])
+
+    # C: Build plane UV axes
+    plane_u, plane_v = _build_plane_axes(plane_normal)
+
+    # D: Get cross-section points — trimesh exact slice first, slab fallback
+    pts: Optional[np.ndarray] = None
+    if faces is not None:
+        pts = _trimesh_plane_slice(vertices, faces, plane_origin, plane_normal)
+    if pts is None or len(pts) < 12:
+        t = thickness
+        for _ in range(3):
+            pts = _slab_at_plane(vertices, plane_origin, plane_normal, t)
+            if len(pts) >= 12:
+                break
+            t *= 1.5
+
+    if pts is None or len(pts) == 0:
+        return 0.0, np.zeros((0, 3), dtype=float)
+
+    # E: Isolate this thigh (UV-space gate, not world XZ)
+    if hip_joint is not None:
+        pts = _isolate_single_thigh(
+            pts, thigh_vertex, hip_joint, plane_u, plane_v, isolation_radius_m
+        )
+
+    # F: UV projection + hull perimeter
+    girth_m = _plane_hull_perimeter(pts, plane_u, plane_v) if len(pts) >= 3 else 0.0
+    return girth_m, pts
+
+
+def _thigh_girth_both_sides(
+    vertices: np.ndarray,
+    faces: Optional[np.ndarray],
+    left_thigh_idx: int,
+    right_thigh_idx: int,
+    left_hip_joint: Optional[np.ndarray],
+    right_hip_joint: Optional[np.ndarray],
+    left_knee_joint: Optional[np.ndarray],
+    right_knee_joint: Optional[np.ndarray],
+    spine3_joint: Optional[np.ndarray] = None,
+    thickness: float = 0.020,
+    isolation_radius_m: float = 0.16,
+):
+    """Compute average thigh girth for both sides. Returns (avg_girth_m, left_ring_pts)."""
+    left_girth, left_ring = _thigh_circumference_smplx_style(
+        vertices, faces, left_thigh_idx, left_hip_joint, left_knee_joint,
+        spine3_joint, thickness, isolation_radius_m,
+    )
+    right_girth, _ = _thigh_circumference_smplx_style(
+        vertices, faces, right_thigh_idx, right_hip_joint, right_knee_joint,
+        spine3_joint, thickness, isolation_radius_m,
+    )
+    valid = [g for g in [left_girth, right_girth] if g and g > 0.0]
+    avg_girth = float(np.mean(valid)) if valid else 0.0
+    return avg_girth, left_ring
+
+
 def _waist_front_back(vertices: np.ndarray, waist_y: float) -> Tuple[Optional[np.ndarray], Optional[np.ndarray]]:
     waist_slice = _section_points(vertices, waist_y, 0.02)
     if waist_slice.shape[0] == 0:
@@ -276,6 +983,27 @@ def compute_measurements(person_rig: Dict, target_height_cm: Optional[float] = N
     if vertices.size == 0:
         raise MeasurementError("Mesh vertices are missing")
 
+    # Extract mesh faces for trimesh-based cross-section (preferred over slab)
+    _faces_raw = mesh.get("faces")
+    _faces_arr: Optional[np.ndarray] = None
+    if _faces_raw is not None:
+        try:
+            _faces_arr = np.asarray(_faces_raw, dtype=np.int32)
+        except Exception:
+            pass
+
+    # Chest landmark vertex indices (known for the MHR mesh)
+    _L_CHEST, _R_CHEST = 7380, 6156
+    _chest_valid = int(_L_CHEST) < vertices.shape[0] and int(_R_CHEST) < vertices.shape[0]
+
+    # Waist landmark vertex indices (known for the MHR mesh)
+    _BELLY_BUTTON, _BACK_BELLY_BUTTON = 5707, 5750
+    _waist_valid = int(_BELLY_BUTTON) < vertices.shape[0] and int(_BACK_BELLY_BUTTON) < vertices.shape[0]
+
+    # Thigh landmark vertex indices (known for the MHR mesh)
+    _L_THIGH, _R_THIGH = 7230, 5983
+    _thigh_valid = int(_L_THIGH) < vertices.shape[0] and int(_R_THIGH) < vertices.shape[0]
+
     ground_y = float(vertices[:, 1].min())
     head_idx = int(np.argmax(vertices[:, 1]))
     head_vertex = vertices[head_idx]
@@ -309,8 +1037,8 @@ def compute_measurements(person_rig: Dict, target_height_cm: Optional[float] = N
     right_ankle = _coalesce_points(keypoint_map.get("right_ankle"), joint_map.get("right_ankle"))
     left_elbow = _coalesce_points(keypoint_map.get("left_elbow"), joint_map.get("left_elbow"))
     right_elbow = _coalesce_points(keypoint_map.get("right_elbow"), joint_map.get("right_elbow"))
-    left_wrist = _coalesce_points(keypoint_map.get("left_wrist"), joint_map.get("left_wrist"))
-    right_wrist = _coalesce_points(keypoint_map.get("right_wrist"), joint_map.get("right_wrist"))
+    left_wrist = _coalesce_points(keypoint_map.get("left_wrist"), joint_map.get("left_wrist"), joint_map.get("left-wrist"))
+    right_wrist = _coalesce_points(keypoint_map.get("right_wrist"), joint_map.get("right_wrist"), joint_map.get("right-wrist"))
     eye_point = _average_points([
         keypoint_map.get("left_eye"),
         keypoint_map.get("right_eye"),
@@ -323,7 +1051,11 @@ def compute_measurements(person_rig: Dict, target_height_cm: Optional[float] = N
     torso_upper_y = float(acromion_center[1]) if acromion_center is not None else float(shoulder_center[1]) if shoulder_center is not None else float(head_vertex[1] * 0.85)
     hip_level_y = float(hip_center[1]) if hip_center is not None else float(ground_y + actual_height_m * 0.45)
     torso_span = max(torso_upper_y - hip_level_y, actual_height_m * 0.1)
-    bust_level_y = torso_upper_y - 0.22 * torso_span
+    # Anchor bust_level_y to actual chest landmark vertices when available
+    if _chest_valid:
+        bust_level_y = float((vertices[_L_CHEST, 1] + vertices[_R_CHEST, 1]) / 2.0)
+    else:
+        bust_level_y = torso_upper_y - 0.22 * torso_span
     underbust_level_y = bust_level_y - 0.05 * torso_span
 
     knee_center = _average_points([left_knee, right_knee])
@@ -338,10 +1070,12 @@ def compute_measurements(person_rig: Dict, target_height_cm: Optional[float] = N
     else:
         ankle_level_y = ground_y + actual_height_m * 0.05
 
-    waist_scan = _scan_min_circumference(vertices, hip_level_y + 0.03, torso_upper_y - 0.05, 30)
-    waist_level_y = float(waist_scan[0]) if waist_scan else float(hip_level_y + 0.15 * torso_span)
+    if _waist_valid:
+        waist_level_y = float((vertices[_BELLY_BUTTON, 1] + vertices[_BACK_BELLY_BUTTON, 1]) / 2.0)
+    else:
+        _waist_scan = _scan_min_circumference(vertices, hip_level_y + 0.03, torso_upper_y - 0.05, 30)
+        waist_level_y = float(_waist_scan[0]) if _waist_scan else float(hip_level_y + 0.15 * torso_span)
 
-    thigh_level_y = hip_level_y - 0.25 * (hip_level_y - knee_level_y)
     calf_level_y = knee_level_y - 0.45 * (knee_level_y - ankle_level_y)
 
     crotch_point = _crotch_point(vertices, hip_center, knee_level_y, ground_y)
@@ -358,8 +1092,6 @@ def compute_measurements(person_rig: Dict, target_height_cm: Optional[float] = N
     head_girth_level = float(head_vertex[1] - 0.12 * head_length)
     neck_level_y = float(neck_point[1] - 0.01) if neck_point is not None else torso_upper_y - 0.05
 
-    thigh_girth_left = _limb_girth(vertices, left_knee, thigh_level_y, radius=0.22)
-    thigh_girth_right = _limb_girth(vertices, right_knee, thigh_level_y, radius=0.22)
     knee_girth_left = _limb_girth(vertices, left_knee, knee_level_y, radius=0.18, thickness=0.015)
     knee_girth_right = _limb_girth(vertices, right_knee, knee_level_y, radius=0.18, thickness=0.015)
     calf_center_left = _average_points([left_knee, left_ankle])
@@ -428,6 +1160,166 @@ def compute_measurements(person_rig: Dict, target_height_cm: Optional[float] = N
         if lateral > 1e-6:
             shoulder_slope = math.degrees(math.atan2(abs(vec[1]), lateral))
 
+    # Shared spine joints for both chest and waist SMPLX-style measurements.
+    # Keypoints use underscores; MHR joint_map uses hyphens — try both.
+    _pelvis_pt = _average_points([
+        _coalesce_points(
+            keypoint_map.get("left_hip"), keypoint_map.get("left-hip"), joint_map.get("left-hip")
+        ),
+        _coalesce_points(
+            keypoint_map.get("right_hip"), keypoint_map.get("right-hip"), joint_map.get("right-hip")
+        ),
+    ])
+    _neck_pt = _coalesce_points(keypoint_map.get("neck"), joint_map.get("neck"))
+
+    # spine2 — at mid-chest level (~65 % up from pelvis to neck).
+    # Used for the chest girth plane normal: gives a near-horizontal cut for
+    # upright/slightly-tilted bodies, matching how a tape measure wraps.
+    # Pelvis→spine2 is shorter and more vertical than pelvis→neck, so it
+    # produces a better-conditioned cutting plane for chest measurement.
+    _spine2_pt = _coalesce_points(
+        joint_map.get("spine2"),
+        joint_map.get("spine-2"),
+        joint_map.get("spine_2"),
+        joint_map.get("Spine2"),
+        keypoint_map.get("spine2"),
+        keypoint_map.get("spine-2"),
+    )
+    # If not found, approximate as 65 % of the way from pelvis up to neck —
+    # spine2 sits at roughly the mid-chest / solar-plexus level.
+    if _spine2_pt is None and _pelvis_pt is not None and _neck_pt is not None:
+        _spine2_pt = np.asarray(_pelvis_pt, dtype=float) + 0.65 * (
+            np.asarray(_neck_pt, dtype=float) - np.asarray(_pelvis_pt, dtype=float)
+        )
+
+    # spine3 — at waist level (between pelvis and neck). Try all likely MHR names.
+    _spine3_pt = _coalesce_points(
+        joint_map.get("spine3"),
+        joint_map.get("spine-3"),
+        joint_map.get("spine_3"),
+        joint_map.get("Spine3"),
+        keypoint_map.get("spine3"),
+        keypoint_map.get("spine-3"),
+    )
+    # If not found, approximate as 40 % of the way from pelvis up to neck —
+    # spine3 sits at roughly the navel/waist level.
+    if _spine3_pt is None and _pelvis_pt is not None and _neck_pt is not None:
+        _spine3_pt = np.asarray(_pelvis_pt, dtype=float) + 0.40 * (
+            np.asarray(_neck_pt, dtype=float) - np.asarray(_pelvis_pt, dtype=float)
+        )
+
+    # SMPLX-style chest girth: landmark-anchored, arm-filtered, trimesh-preferred.
+    # Uses spine2 (not neck) for the plane normal — gives a near-horizontal cut
+    # at chest level, matching the anatomical tape-measure direction.
+    if _chest_valid:
+        _bust_girth_m, _chest_ring_3d = _chest_circumference_smplx_style(
+            vertices=vertices,
+            faces=_faces_arr,
+            left_chest_idx=_L_CHEST,
+            right_chest_idx=_R_CHEST,
+            pelvis_joint=_pelvis_pt,
+            spine_joint=_spine2_pt,
+            left_wrist_joint=left_wrist,
+            right_wrist_joint=right_wrist,
+        )
+    else:
+        _bust_girth_m = _section_circumference(vertices, bust_level_y, 0.02)
+        _chest_ring_3d = np.zeros((0, 3), dtype=float)
+
+    # SMPLX-style waist girth: sagittal anchor, spine3 plane, trimesh contour
+    # for hand exclusion (same _trimesh_chest_contour mechanism as chest).
+    if _waist_valid:
+        _waist_girth_m, _waist_ring_3d = _waist_circumference_smplx_style(
+            vertices=vertices,
+            faces=_faces_arr,
+            belly_button_idx=_BELLY_BUTTON,
+            back_belly_button_idx=_BACK_BELLY_BUTTON,
+            pelvis_joint=_pelvis_pt,
+            spine3_joint=_spine3_pt,
+            left_wrist_joint=left_wrist,
+            right_wrist_joint=right_wrist,
+        )
+    else:
+        _waist_girth_m = _section_circumference(vertices, waist_level_y, 0.02)
+        _waist_ring_3d = np.zeros((0, 3), dtype=float)
+
+    # Cross-section ring at the spine3 joint for viewport visualisation.
+    # Slices the mesh with a horizontal plane through spine3 — gives the ring
+    # that wraps around the body at that joint level (same pattern as chest /
+    # waist / hip rings).
+    # Build wrist exclusion zones once (reused by spine3 ring and waist slab debug)
+    _wrist_excl_xz: Optional[List[np.ndarray]] = None
+    _wrist_pts_list = [w for w in (left_wrist, right_wrist) if w is not None]
+    if _wrist_pts_list:
+        _wrist_excl_xz = [np.array([float(w[0]), float(w[2])]) for w in _wrist_pts_list]
+
+    _spine3_ring_3d: np.ndarray = np.zeros((0, 3), dtype=float)
+    if _spine3_pt is not None and _faces_arr is not None:
+        _s3_origin = np.asarray(_spine3_pt, dtype=float)
+        _s3_ring = _trimesh_chest_contour(
+            vertices, _faces_arr,
+            _s3_origin, np.array([0.0, 1.0, 0.0]), _s3_origin,
+            exclusion_xz=_wrist_excl_xz,
+        )
+        if _s3_ring is not None and len(_s3_ring) >= 3:
+            _spine3_ring_3d = _s3_ring
+
+    # Compute waist slab vertices for the debug cut visualisation.
+    # These are all mesh vertices within ±25 mm of the horizontal waist plane,
+    # filtered to the torso region (XZ radius ≤ 0.28 m from the waist centre)
+    # and with arm vertices excluded using wrist joint XZ positions.
+    _waist_slab_vis: np.ndarray = np.zeros((0, 3), dtype=float)
+    if _waist_valid:
+        _wv_front = vertices[_BELLY_BUTTON]
+        _wv_back = vertices[_BACK_BELLY_BUTTON]
+        _waist_plane_origin_vis = (_wv_front + _wv_back) / 2.0
+        _slab_raw = _slab_at_plane(vertices, _waist_plane_origin_vis,
+                                   np.array([0.0, 1.0, 0.0]), 0.025)
+        if len(_slab_raw) > 0:
+            _cx, _cz = _waist_plane_origin_vis[0], _waist_plane_origin_vis[2]
+            _dist_xz = np.linalg.norm(_slab_raw[:, [0, 2]] - np.array([_cx, _cz]), axis=1)
+            _slab_torso = _slab_raw[_dist_xz <= 0.28]
+            # Exclude arm vertices using the same max-distance torso zone logic
+            if _wrist_excl_xz and len(_slab_torso) > 0:
+                _body_cxz = np.array([_waist_plane_origin_vis[0], _waist_plane_origin_vis[2]])
+                _min_wd = min(np.linalg.norm(_ex - _body_cxz) for _ex in _wrist_excl_xz)
+                _max_tr = _min_wd * 0.82
+                _d2c = np.linalg.norm(_slab_torso[:, [0, 2]] - _body_cxz, axis=1)
+                _slab_torso = _slab_torso[_d2c <= _max_tr]
+            _waist_slab_vis = _slab_torso
+
+    # SMPLX-style hip girth: pubic-bone-anchored, spine3-perpendicular plane,
+    # trimesh exact slice.  Uses spine3 (same as waist) — not spine/neck.
+    # The cutting height is lower than waist because plane origin = pubic bone
+    # (below belly-button midpoint), not because the plane normal changes.
+    _pubic_bone_idx = _find_pubic_bone_idx(vertices, hip_level_y, actual_height_m)
+    _hip_girth_m, _hip_ring_3d = _hip_circumference_smplx_style(
+        vertices=vertices,
+        faces=_faces_arr,
+        pubic_bone_idx=_pubic_bone_idx,
+        pelvis_joint=_pelvis_pt,
+        spine3_joint=_spine3_pt,
+    )
+
+    # SMPLX-style thigh girth: leg-axis plane through thigh landmark vertex,
+    # UV-space radial gate to isolate each thigh from the other leg.
+    _thigh_girth_m: float = 0.0
+    _left_thigh_ring_3d: np.ndarray = np.zeros((0, 3), dtype=float)
+    if _thigh_valid:
+        _thigh_girth_m, _left_thigh_ring_3d = _thigh_girth_both_sides(
+            vertices=vertices,
+            faces=_faces_arr,
+            left_thigh_idx=_L_THIGH,
+            right_thigh_idx=_R_THIGH,
+            left_hip_joint=left_hip,
+            right_hip_joint=right_hip,
+            left_knee_joint=left_knee,
+            right_knee_joint=right_knee,
+            spine3_joint=_spine3_pt,
+            thickness=0.020,
+            isolation_radius_m=0.16,
+        )
+
     raw_measurements: Dict[str, Optional[float]] = {
         "body_height": actual_height_m,
         "eye_height": (eye_point[1] - ground_y) if eye_point is not None else None,
@@ -438,11 +1330,11 @@ def compute_measurements(person_rig: Dict, target_height_cm: Optional[float] = N
         "knee_height": knee_level_y - ground_y,
         "head_girth": _section_circumference(vertices, head_girth_level, 0.01),
         "neck_girth": _section_circumference(vertices, neck_level_y, 0.01),
-        "bust_girth": _section_circumference(vertices, bust_level_y, 0.02),
+        "bust_girth": _bust_girth_m,
         "underbust_girth": _section_circumference(vertices, underbust_level_y, 0.02),
-        "waist_girth": waist_scan[1] if waist_scan else _section_circumference(vertices, waist_level_y, 0.02),
-        "hip_girth": _section_circumference(vertices, hip_level_y, 0.025),
-        "thigh_girth": _average_values([thigh_girth_left, thigh_girth_right]),
+        "waist_girth": _waist_girth_m,
+        "hip_girth": _hip_girth_m,
+        "thigh_girth": _thigh_girth_m if _thigh_girth_m > 0.0 else None,
         "knee_girth": _average_values([knee_girth_left, knee_girth_right]),
         "calf_girth": _average_values([calf_girth_left, calf_girth_right]),
         "ankle_girth": _average_values([ankle_girth_left, ankle_girth_right]),
@@ -486,6 +1378,29 @@ def compute_measurements(person_rig: Dict, target_height_cm: Optional[float] = N
         "crotch": _landmark_to_list(crotch_point),
         "lateral_malleolus_left": _landmark_to_list(left_ankle),
         "lateral_malleolus_right": _landmark_to_list(right_ankle),
+        # Chest ring visualization data (SMPLX-style)
+        "chest_ring_points": _chest_ring_3d.round(6).tolist() if len(_chest_ring_3d) > 0 else [],
+        "left_chest_landmark": vertices[_L_CHEST].astype(float).round(6).tolist() if _chest_valid else None,
+        "right_chest_landmark": vertices[_R_CHEST].astype(float).round(6).tolist() if _chest_valid else None,
+        # Waist ring visualization data (SMPLX-style)
+        "waist_ring_points": _waist_ring_3d.round(6).tolist() if len(_waist_ring_3d) > 0 else [],
+        "belly_button_landmark": vertices[_BELLY_BUTTON].astype(float).round(6).tolist() if _waist_valid else None,
+        "back_belly_button_landmark": vertices[_BACK_BELLY_BUTTON].astype(float).round(6).tolist() if _waist_valid else None,
+        # Joints used for the waist plane normal (for viewport ring markers)
+        "waist_pelvis_joint": _landmark_to_list(_pelvis_pt),
+        "waist_spine3_joint": _landmark_to_list(_spine3_pt),
+        "waist_left_wrist_joint": _landmark_to_list(left_wrist),
+        "waist_right_wrist_joint": _landmark_to_list(right_wrist),
+        # Cross-section ring AT the spine3 joint level (purple ring in viewport)
+        "spine3_ring_points": _spine3_ring_3d.round(6).tolist() if len(_spine3_ring_3d) > 0 else [],
+        # All mesh vertices within the horizontal waist slab (for debug cut view)
+        "waist_slab_vertices": _waist_slab_vis.round(5).tolist() if len(_waist_slab_vis) > 0 else [],
+        # Hip ring visualization data (SMPLX-style)
+        "hip_ring_points": _hip_ring_3d.round(6).tolist() if len(_hip_ring_3d) > 0 else [],
+        "pubic_bone_landmark": vertices[_pubic_bone_idx].astype(float).round(6).tolist(),
+        # Left thigh ring visualization data (SMPLX-style)
+        "left_thigh_ring_points": _left_thigh_ring_3d.round(6).tolist() if len(_left_thigh_ring_3d) > 0 else [],
+        "left_thigh_landmark": vertices[_L_THIGH].astype(float).round(6).tolist() if _thigh_valid else None,
     }
 
     schema = {

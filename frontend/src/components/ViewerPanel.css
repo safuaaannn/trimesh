@@ -60,3 +60,52 @@
   max-width: 400px;
   width: 90%;
 }
+
+/* Wireframe toggle button — top-left of 3D viewport */
+.viewer-wireframe-btn {
+  position: absolute;
+  top: 12px;
+  left: 12px;
+  z-index: 10;
+  background: rgba(8, 16, 32, 0.82);
+  color: #88ccff;
+  border: 1px solid rgba(80, 160, 255, 0.35);
+  border-radius: 6px;
+  padding: 5px 13px;
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.06em;
+  cursor: pointer;
+  backdrop-filter: blur(6px);
+  transition: background 0.15s, border-color 0.15s, color 0.15s;
+  user-select: none;
+}
+.viewer-wireframe-btn:hover {
+  background: rgba(20, 45, 90, 0.9);
+  border-color: rgba(80, 160, 255, 0.65);
+  color: #bbdeff;
+}
+.viewer-wireframe-btn.active {
+  background: rgba(0, 70, 160, 0.88);
+  border-color: #44aaff;
+  color: #ffffff;
+}
+
+/* Vertex index tooltip that follows the cursor */
+.vertex-tooltip {
+  position: fixed;
+  z-index: 200;
+  background: rgba(8, 14, 28, 0.93);
+  color: #00ffcc;
+  border: 1px solid rgba(0, 255, 200, 0.38);
+  border-radius: 5px;
+  padding: 3px 9px;
+  font-size: 11px;
+  font-weight: 700;
+  font-family: 'Courier New', monospace;
+  letter-spacing: 0.04em;
+  pointer-events: none;
+  white-space: nowrap;
+  backdrop-filter: blur(4px);
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.5);
+}

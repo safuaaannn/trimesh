@@ -7,7 +7,17 @@ import numpy as np
 import torch.nn as nn
 import torchvision.transforms.functional as F
 from PIL import Image, ImageOps
-from sam_3d_body.models.modules import to_2tuple
+import collections.abc
+from itertools import repeat
+
+def _ntuple(n):
+    def parse(x):
+        if isinstance(x, collections.abc.Iterable) and not isinstance(x, str):
+            return tuple(x)
+        return tuple(repeat(x, n))
+    return parse
+
+to_2tuple = _ntuple(2)
 
 from .bbox_utils import (
     bbox_cs2xyxy,

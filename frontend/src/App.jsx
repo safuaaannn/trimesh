@@ -514,6 +514,7 @@ function App() {
                 jointRotationsByPerson={jointRotationsByPerson}
                 showJoints={showJoints}
                 language={language}
+                measurementData={currentMeasurement}
               />
 
               {rigData && (

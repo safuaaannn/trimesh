@@ -12,7 +12,8 @@ export default function ViewerPanel({
   jointRotations,
   jointRotationsByPerson,
   showJoints,
-  language
+  language,
+  measurementData
 }) {
   const mountRef = useRef(null)
   const sceneRef = useRef(null)
@@ -23,8 +24,16 @@ export default function ViewerPanel({
   const frameIdRef = useRef(null)
   const raycasterRef = useRef(null)
   const mouseRef = useRef(new THREE.Vector2())
+  const chestVisualsRef = useRef(null) // Chest ring + landmark spheres
+  const waistVisualsRef = useRef(null) // Waist ring + landmark spheres
+  const hipVisualsRef = useRef(null)   // Hip ring + pubic bone landmark sphere
+  const thighVisualsRef = useRef(null) // Left thigh ring + landmark sphere
+  const waistCutVisualsRef = useRef(null) // Waist slab vertex point cloud (debug)
   const [error, setError] = useState(null)
   const [isLoading, setIsLoading] = useState(false)
+  const [showWireframe, setShowWireframe] = useState(false)
+  const [showWaistCut, setShowWaistCut] = useState(false)
+  const [hoveredVertex, setHoveredVertex] = useState(null) // { index, x, y }
 
   const t = translations[language]
 
@@ -106,6 +115,38 @@ export default function ViewerPanel({
 
       renderer.domElement.addEventListener('click', handleClick)
 
+      // Mouse-move handler — find nearest vertex under cursor
+      const handleMouseMove = (event) => {
+        if (!personsRef.current.length || !cameraRef.current || !raycasterRef.current) {
+          setHoveredVertex(null)
+          return
+        }
+        const rect = renderer.domElement.getBoundingClientRect()
+        const mx = ((event.clientX - rect.left) / rect.width) * 2 - 1
+        const my = -((event.clientY - rect.top) / rect.height) * 2 + 1
+        raycasterRef.current.setFromCamera(new THREE.Vector2(mx, my), cameraRef.current)
+        const meshes = personsRef.current.map(p => p.mesh).filter(Boolean)
+        const hits = raycasterRef.current.intersectObjects(meshes, false)
+        if (hits.length > 0 && hits[0].face) {
+          const { face, point, object: hitMesh } = hits[0]
+          const pos = hitMesh.geometry.getAttribute('position')
+          const va = new THREE.Vector3().fromBufferAttribute(pos, face.a).applyMatrix4(hitMesh.matrixWorld)
+          const vb = new THREE.Vector3().fromBufferAttribute(pos, face.b).applyMatrix4(hitMesh.matrixWorld)
+          const vc = new THREE.Vector3().fromBufferAttribute(pos, face.c).applyMatrix4(hitMesh.matrixWorld)
+          const da = va.distanceToSquared(point)
+          const db = vb.distanceToSquared(point)
+          const dc = vc.distanceToSquared(point)
+          let vtx
+          if (da <= db && da <= dc) vtx = face.a
+          else if (db <= dc) vtx = face.b
+          else vtx = face.c
+          setHoveredVertex({ index: vtx, x: event.clientX, y: event.clientY })
+        } else {
+          setHoveredVertex(null)
+        }
+      }
+      renderer.domElement.addEventListener('mousemove', handleMouseMove)
+
       // Animation loop
       const animate = () => {
         frameIdRef.current = requestAnimationFrame(animate)
@@ -143,6 +184,7 @@ export default function ViewerPanel({
         console.log('[Viewer] Cleaning up scene...')
         window.removeEventListener('resize', handleResize)
         renderer.domElement.removeEventListener('click', handleClick)
+        renderer.domElement.removeEventListener('mousemove', handleMouseMove)
 
         if (frameIdRef.current) {
           cancelAnimationFrame(frameIdRef.current)
@@ -182,6 +224,48 @@ export default function ViewerPanel({
 
     try {
       const scene = sceneRef.current
+
+      // Clear measurement visuals from previous session
+      if (chestVisualsRef.current) {
+        scene.remove(chestVisualsRef.current)
+        chestVisualsRef.current.traverse(child => {
+          if (child.geometry) child.geometry.dispose()
+          if (child.material) child.material.dispose()
+        })
+        chestVisualsRef.current = null
+      }
+      if (waistVisualsRef.current) {
+        scene.remove(waistVisualsRef.current)
+        waistVisualsRef.current.traverse(child => {
+          if (child.geometry) child.geometry.dispose()
+          if (child.material) child.material.dispose()
+        })
+        waistVisualsRef.current = null
+      }
+      if (hipVisualsRef.current) {
+        scene.remove(hipVisualsRef.current)
+        hipVisualsRef.current.traverse(child => {
+          if (child.geometry) child.geometry.dispose()
+          if (child.material) child.material.dispose()
+        })
+        hipVisualsRef.current = null
+      }
+      if (thighVisualsRef.current) {
+        scene.remove(thighVisualsRef.current)
+        thighVisualsRef.current.traverse(child => {
+          if (child.geometry) child.geometry.dispose()
+          if (child.material) child.material.dispose()
+        })
+        thighVisualsRef.current = null
+      }
+      if (waistCutVisualsRef.current) {
+        scene.remove(waistCutVisualsRef.current)
+        waistCutVisualsRef.current.traverse(child => {
+          if (child.geometry) child.geometry.dispose()
+          if (child.material) child.material.dispose()
+        })
+        waistCutVisualsRef.current = null
+      }
 
       // Clear previous persons - with proper cleanup
       console.log('[Viewer] Clearing', personsRef.current.length, 'previous person(s)')
@@ -703,6 +787,380 @@ export default function ViewerPanel({
     })
   }, [showJoints])
 
+  // Wireframe toggle — switches all person meshes between solid and wireframe
+  useEffect(() => {
+    personsRef.current.forEach((person, idx) => {
+      const mat = person.mesh?.material
+      if (!mat) return
+      const isSelected = idx === selectedPerson
+      mat.wireframe = showWireframe
+      if (showWireframe) {
+        mat.color.setHex(isSelected ? 0x00ffff : 0x44aaff)
+        if (mat.emissive) mat.emissive.setHex(0x000000)
+        mat.emissiveIntensity = 0
+      } else {
+        mat.color.setHex(isSelected ? 0x4aefff : 0x4a9eff)
+        if (mat.emissive) mat.emissive.setHex(isSelected ? 0x002244 : 0x000000)
+        mat.emissiveIntensity = isSelected ? 0.3 : 0
+      }
+      mat.needsUpdate = true
+    })
+  }, [showWireframe, selectedPerson])
+
+  // Chest ring + landmark visualization (SMPLX-style measurement)
+  useEffect(() => {
+    const scene = sceneRef.current
+    if (!scene) return
+
+    // Always clear stale visuals first
+    if (chestVisualsRef.current) {
+      scene.remove(chestVisualsRef.current)
+      chestVisualsRef.current.traverse(child => {
+        if (child.geometry) child.geometry.dispose()
+        if (child.material) child.material.dispose()
+      })
+      chestVisualsRef.current = null
+    }
+
+    const landmarks = measurementData?.landmarks
+    if (!landmarks) return
+
+    const ringPoints = landmarks.chest_ring_points
+    const leftPt = landmarks.left_chest_landmark
+    const rightPt = landmarks.right_chest_landmark
+    if (!ringPoints?.length && !leftPt && !rightPt) return
+
+    const personData = personsRef.current[selectedPerson]
+    if (!personData?.mesh) return
+
+    const group = new THREE.Group()
+    // Match the world-space offset of the person's mesh
+    group.position.copy(personData.mesh.position)
+
+    // 1. Closed measurement ring through the convex hull vertices
+    if (ringPoints && ringPoints.length >= 3) {
+      // Close the loop by appending the first point at the end
+      const closed = [...ringPoints, ringPoints[0]]
+      const posArr = new Float32Array(closed.flatMap(p => p))
+      const geo = new THREE.BufferGeometry()
+      geo.setAttribute('position', new THREE.BufferAttribute(posArr, 3))
+      const ring = new THREE.Line(
+        geo,
+        new THREE.LineBasicMaterial({ color: 0xffcc00, linewidth: 2 })
+      )
+      group.add(ring)
+    }
+
+    // 2. Left chest landmark sphere (vertex 7380) — red
+    if (leftPt) {
+      const sphere = new THREE.Mesh(
+        new THREE.SphereGeometry(0.018, 16, 16),
+        new THREE.MeshBasicMaterial({ color: 0xff3333 })
+      )
+      sphere.position.set(leftPt[0], leftPt[1], leftPt[2])
+      group.add(sphere)
+    }
+
+    // 3. Right chest landmark sphere (vertex 6156) — blue
+    if (rightPt) {
+      const sphere = new THREE.Mesh(
+        new THREE.SphereGeometry(0.018, 16, 16),
+        new THREE.MeshBasicMaterial({ color: 0x44aaff })
+      )
+      sphere.position.set(rightPt[0], rightPt[1], rightPt[2])
+      group.add(sphere)
+    }
+
+    scene.add(group)
+    chestVisualsRef.current = group
+  }, [measurementData, selectedPerson])
+
+  // Waist ring + landmark visualization (SMPLX-style measurement)
+  useEffect(() => {
+    const scene = sceneRef.current
+    if (!scene) return
+
+    // Always clear stale visuals first
+    if (waistVisualsRef.current) {
+      scene.remove(waistVisualsRef.current)
+      waistVisualsRef.current.traverse(child => {
+        if (child.geometry) child.geometry.dispose()
+        if (child.material) child.material.dispose()
+      })
+      waistVisualsRef.current = null
+    }
+
+    const landmarks = measurementData?.landmarks
+    if (!landmarks) return
+
+    const ringPoints = landmarks.waist_ring_points
+    const frontPt = landmarks.belly_button_landmark
+    const backPt = landmarks.back_belly_button_landmark
+    if (!ringPoints?.length && !frontPt && !backPt) return
+
+    const personData = personsRef.current[selectedPerson]
+    if (!personData?.mesh) return
+
+    const group = new THREE.Group()
+    group.position.copy(personData.mesh.position)
+
+    // 1. Closed waist ring — teal/mint to distinguish from gold chest ring
+    if (ringPoints && ringPoints.length >= 3) {
+      const closed = [...ringPoints, ringPoints[0]]
+      const posArr = new Float32Array(closed.flatMap(p => p))
+      const geo = new THREE.BufferGeometry()
+      geo.setAttribute('position', new THREE.BufferAttribute(posArr, 3))
+      const ring = new THREE.Line(
+        geo,
+        new THREE.LineBasicMaterial({ color: 0x00ffcc, linewidth: 2 })
+      )
+      group.add(ring)
+    }
+
+    // 2. Front (belly button) landmark sphere — green
+    if (frontPt) {
+      const sphere = new THREE.Mesh(
+        new THREE.SphereGeometry(0.018, 16, 16),
+        new THREE.MeshBasicMaterial({ color: 0x00ff44 })
+      )
+      sphere.position.set(frontPt[0], frontPt[1], frontPt[2])
+      group.add(sphere)
+    }
+
+    // 3. Back (lumbar) landmark sphere — orange
+    if (backPt) {
+      const sphere = new THREE.Mesh(
+        new THREE.SphereGeometry(0.018, 16, 16),
+        new THREE.MeshBasicMaterial({ color: 0xff8800 })
+      )
+      sphere.position.set(backPt[0], backPt[1], backPt[2])
+      group.add(sphere)
+    }
+
+    // 4. spine3 joint — purple circumference ring (body cross-section at that level)
+    //    + sphere marker at the joint centre, matching the chest/waist/hip ring style
+    const spine3Pt = landmarks.waist_spine3_joint
+    const pelvisPt = landmarks.waist_pelvis_joint
+    const spine3Ring = landmarks.spine3_ring_points
+
+    if (spine3Ring && spine3Ring.length >= 3) {
+      const closed = [...spine3Ring, spine3Ring[0]]
+      const posArr = new Float32Array(closed.flatMap(p => p))
+      const geo = new THREE.BufferGeometry()
+      geo.setAttribute('position', new THREE.BufferAttribute(posArr, 3))
+      const ring = new THREE.Line(
+        geo,
+        new THREE.LineBasicMaterial({ color: 0xcc44ff, linewidth: 2 })
+      )
+      group.add(ring)
+    }
+
+    if (spine3Pt) {
+      const s = new THREE.Mesh(
+        new THREE.SphereGeometry(0.016, 16, 16),
+        new THREE.MeshBasicMaterial({ color: 0xcc44ff })
+      )
+      s.position.set(spine3Pt[0], spine3Pt[1], spine3Pt[2])
+      group.add(s)
+    }
+
+    // 5. Pelvis joint — smaller purple sphere
+    if (pelvisPt) {
+      const s = new THREE.Mesh(
+        new THREE.SphereGeometry(0.012, 12, 12),
+        new THREE.MeshBasicMaterial({ color: 0x7722cc })
+      )
+      s.position.set(pelvisPt[0], pelvisPt[1], pelvisPt[2])
+      group.add(s)
+    }
+
+    // 6. Wrist joints — small cyan spheres (hand positions at waist level)
+    for (const wPt of [landmarks.waist_left_wrist_joint, landmarks.waist_right_wrist_joint]) {
+      if (wPt) {
+        const s = new THREE.Mesh(
+          new THREE.SphereGeometry(0.010, 12, 12),
+          new THREE.MeshBasicMaterial({ color: 0x00ccff })
+        )
+        s.position.set(wPt[0], wPt[1], wPt[2])
+        group.add(s)
+      }
+    }
+
+    scene.add(group)
+    waistVisualsRef.current = group
+  }, [measurementData, selectedPerson])
+
+  // Hip ring + pubic bone landmark (SMPLX-style measurement)
+  useEffect(() => {
+    const scene = sceneRef.current
+    if (!scene) return
+
+    if (hipVisualsRef.current) {
+      scene.remove(hipVisualsRef.current)
+      hipVisualsRef.current.traverse(child => {
+        if (child.geometry) child.geometry.dispose()
+        if (child.material) child.material.dispose()
+      })
+      hipVisualsRef.current = null
+    }
+
+    const landmarks = measurementData?.landmarks
+    if (!landmarks) return
+
+    const ringPoints = landmarks.hip_ring_points
+    const pubicPt = landmarks.pubic_bone_landmark
+    if (!ringPoints?.length && !pubicPt) return
+
+    const personData = personsRef.current[selectedPerson]
+    if (!personData?.mesh) return
+
+    const group = new THREE.Group()
+    group.position.copy(personData.mesh.position)
+
+    // 1. Closed hip ring — warm orange to distinguish from chest (gold) and waist (teal)
+    if (ringPoints && ringPoints.length >= 3) {
+      const closed = [...ringPoints, ringPoints[0]]
+      const posArr = new Float32Array(closed.flatMap(p => p))
+      const geo = new THREE.BufferGeometry()
+      geo.setAttribute('position', new THREE.BufferAttribute(posArr, 3))
+      const ring = new THREE.Line(
+        geo,
+        new THREE.LineBasicMaterial({ color: 0xff6600, linewidth: 2 })
+      )
+      group.add(ring)
+    }
+
+    // 2. Pubic bone landmark sphere — yellow
+    if (pubicPt) {
+      const sphere = new THREE.Mesh(
+        new THREE.SphereGeometry(0.018, 16, 16),
+        new THREE.MeshBasicMaterial({ color: 0xffff00 })
+      )
+      sphere.position.set(pubicPt[0], pubicPt[1], pubicPt[2])
+      group.add(sphere)
+    }
+
+    scene.add(group)
+    hipVisualsRef.current = group
+  }, [measurementData, selectedPerson])
+
+  // Left thigh ring (SMPLX-style — UV-projected, leg-axis plane)
+  useEffect(() => {
+    const scene = sceneRef.current
+    if (!scene) return
+
+    if (thighVisualsRef.current) {
+      scene.remove(thighVisualsRef.current)
+      thighVisualsRef.current.traverse(child => {
+        if (child.geometry) child.geometry.dispose()
+        if (child.material) child.material.dispose()
+      })
+      thighVisualsRef.current = null
+    }
+
+    const landmarks = measurementData?.landmarks
+    if (!landmarks) return
+
+    const ringPoints = landmarks.left_thigh_ring_points
+    const thighPt = landmarks.left_thigh_landmark
+    if (!ringPoints?.length && !thighPt) return
+
+    const personData = personsRef.current[selectedPerson]
+    if (!personData?.mesh) return
+
+    const group = new THREE.Group()
+    group.position.copy(personData.mesh.position)
+
+    // Closed left thigh ring — magenta to distinguish from all other rings
+    if (ringPoints && ringPoints.length >= 3) {
+      const closed = [...ringPoints, ringPoints[0]]
+      const posArr = new Float32Array(closed.flatMap(p => p))
+      const geo = new THREE.BufferGeometry()
+      geo.setAttribute('position', new THREE.BufferAttribute(posArr, 3))
+      const ring = new THREE.Line(
+        geo,
+        new THREE.LineBasicMaterial({ color: 0xff00aa, linewidth: 2 })
+      )
+      group.add(ring)
+    }
+
+    // Left thigh landmark sphere — bright pink
+    if (thighPt) {
+      const sphere = new THREE.Mesh(
+        new THREE.SphereGeometry(0.016, 16, 16),
+        new THREE.MeshBasicMaterial({ color: 0xff44cc })
+      )
+      sphere.position.set(thighPt[0], thighPt[1], thighPt[2])
+      group.add(sphere)
+    }
+
+    scene.add(group)
+    thighVisualsRef.current = group
+  }, [measurementData, selectedPerson])
+
+  // Waist slab vertex debug visualisation — shows every mesh vertex that lies
+  // inside the horizontal cutting slab used for the waist circumference.
+  useEffect(() => {
+    const scene = sceneRef.current
+    if (!scene) return
+
+    // Always clear previous slab visuals
+    if (waistCutVisualsRef.current) {
+      scene.remove(waistCutVisualsRef.current)
+      waistCutVisualsRef.current.traverse(child => {
+        if (child.geometry) child.geometry.dispose()
+        if (child.material) child.material.dispose()
+      })
+      waistCutVisualsRef.current = null
+    }
+
+    if (!showWaistCut) return
+
+    const slabVerts = measurementData?.landmarks?.waist_slab_vertices
+    if (!slabVerts?.length) return
+
+    const personData = personsRef.current[selectedPerson]
+    if (!personData?.mesh) return
+
+    const group = new THREE.Group()
+    group.position.copy(personData.mesh.position)
+
+    // Render all slab vertices as a magenta point cloud
+    const positions = new Float32Array(slabVerts.flat())
+    const geo = new THREE.BufferGeometry()
+    geo.setAttribute('position', new THREE.BufferAttribute(positions, 3))
+    const points = new THREE.Points(
+      geo,
+      new THREE.PointsMaterial({ color: 0xff00ff, size: 0.012, sizeAttenuation: true })
+    )
+    group.add(points)
+
+    // Also draw a thin semi-transparent horizontal disc at the waist level
+    // to make the cutting plane obvious
+    const frontPt = measurementData?.landmarks?.belly_button_landmark
+    const backPt = measurementData?.landmarks?.back_belly_button_landmark
+    if (frontPt && backPt) {
+      const waistY = (frontPt[1] + backPt[1]) / 2
+      const waistX = (frontPt[0] + backPt[0]) / 2
+      const waistZ = (frontPt[2] + backPt[2]) / 2
+      const discGeo = new THREE.CircleGeometry(0.30, 64)
+      discGeo.rotateX(Math.PI / 2)
+      const discMat = new THREE.MeshBasicMaterial({
+        color: 0xff00ff,
+        transparent: true,
+        opacity: 0.10,
+        side: THREE.DoubleSide,
+        depthWrite: false,
+      })
+      const disc = new THREE.Mesh(discGeo, discMat)
+      disc.position.set(waistX, waistY, waistZ)
+      group.add(disc)
+    }
+
+    scene.add(group)
+    waistCutVisualsRef.current = group
+  }, [showWaistCut, measurementData, selectedPerson])
+
   return (
     <div className="viewer-container">
       <div ref={mountRef} style={{ width: '100%', height: '100%' }} />
@@ -741,6 +1199,42 @@ export default function ViewerPanel({
           <Text size="1" color="gray">
             {language === 'zh' ? '点击模型以选择人物' : 'Click on a model to select person'}
           </Text>
+        </div>
+      )}
+
+      {allRigData && (
+        <button
+          className={`viewer-wireframe-btn${showWireframe ? ' active' : ''}`}
+          onClick={() => setShowWireframe(v => !v)}
+          title={showWireframe
+            ? (language === 'zh' ? '切换为实体模型' : 'Switch to solid mesh')
+            : (language === 'zh' ? '切换为线框模型' : 'Switch to wireframe')}
+        >
+          {showWireframe
+            ? (language === 'zh' ? '◼ 实体' : '◼ Solid')
+            : (language === 'zh' ? '⬡ 线框' : '⬡ Wire')}
+        </button>
+      )}
+
+      {allRigData && measurementData && (
+        <button
+          className={`viewer-wireframe-btn${showWaistCut ? ' active' : ''}`}
+          style={{ top: '46px' }}
+          onClick={() => setShowWaistCut(v => !v)}
+          title={language === 'zh' ? '显示腰部截面顶点' : 'Show waist cut vertices'}
+        >
+          {showWaistCut
+            ? (language === 'zh' ? '◉ 腰截面' : '◉ Waist Cut')
+            : (language === 'zh' ? '○ 腰截面' : '○ Waist Cut')}
+        </button>
+      )}
+
+      {hoveredVertex !== null && (
+        <div
+          className="vertex-tooltip"
+          style={{ left: hoveredVertex.x + 14, top: hoveredVertex.y - 12 }}
+        >
+          #{hoveredVertex.index}
         </div>
       )}
     </div>
