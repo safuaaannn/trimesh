@@ -42,6 +42,7 @@ MEASUREMENT_META: Dict[str, MeasurementMeta] = {
     "chest_width": MeasurementMeta("chest_width", "cm", True, "width"),
     "arm_length": MeasurementMeta("arm_length", "cm", True, "special"),
     "total_crotch_length": MeasurementMeta("total_crotch_length", "cm", True, "special"),
+    "shoulder_to_crotch": MeasurementMeta("shoulder_to_crotch", "cm", True, "vertical"),
     "shoulder_slope": MeasurementMeta("shoulder_slope", "deg", False, "angle"),
 }
 
@@ -831,90 +832,231 @@ def _plane_hull_perimeter(pts_3d: np.ndarray, plane_u: np.ndarray, plane_v: np.n
     return math.pi * (a + b) * (1 + 3 * h / (10 + math.sqrt(4 - 3 * h)))
 
 
+def _trimesh_thigh_contour(
+    vertices: np.ndarray,
+    faces: np.ndarray,
+    plane_origin: np.ndarray,
+    plane_normal: np.ndarray,
+    thigh_center: np.ndarray,
+    plane_u: np.ndarray,
+    plane_v: np.ndarray,
+    isolation_radius_m: float = 0.16,
+) -> Optional[np.ndarray]:
+    """
+    Slice the mesh and return an ordered ring for ONE thigh only.
+
+    Two-stage isolation
+    -------------------
+    Stage 1 — Generous UV filter (2× isolation_radius_m, min 0.25 m):
+        Removes far body parts (torso, other leg if far away, arms).
+        Deliberately wide so even when landmark vertices are biased to the
+        inner thigh, the full outer arc of the thigh is still included.
+
+    Stage 2 — Nearest-centroid selection:
+        Stitch surviving segments into contours; pick the one whose 3-D
+        centroid is closest to thigh_center.  If two legs survived stage 1
+        (close-stance body), this correctly picks the target thigh whose
+        ring centroid is always nearer to the known landmark vertex.
+
+    Why two stages:
+        A tight UV filter from an inner-vertex cluster clips the outer half
+        of the thigh (the symptom: incomplete half-ring).  A loose filter
+        followed by centroid selection gives the full ring while still
+        rejecting the opposite leg.
+    """
+    try:
+        import trimesh
+        mesh = trimesh.Trimesh(vertices=vertices, faces=faces, process=False)
+        segments = trimesh.intersections.mesh_plane(mesh, plane_normal, plane_origin)
+        if segments is None or len(segments) < 3:
+            return None
+
+        # Stage 1: generous UV gate — captures full thigh ring
+        generous_r = max(isolation_radius_m * 2.0, 0.25)
+        thigh_uv = np.array([float(np.dot(thigh_center, plane_u)),
+                              float(np.dot(thigh_center, plane_v))])
+        keep = []
+        for seg in segments:
+            mid_3d = (seg[0] + seg[1]) / 2.0
+            mid_uv = np.array([float(np.dot(mid_3d, plane_u)),
+                                float(np.dot(mid_3d, plane_v))])
+            if float(np.linalg.norm(mid_uv - thigh_uv)) <= generous_r:
+                keep.append(seg)
+
+        if not keep:
+            return None
+
+        # Stage 2: stitch + nearest-centroid picks the correct thigh
+        contours = _build_contours_from_segments(np.array(keep, dtype=float))
+        if not contours:
+            return None
+
+        best: Optional[np.ndarray] = None
+        best_dist = float('inf')
+        for c in contours:
+            if len(c) < 3:
+                continue
+            d = float(np.linalg.norm(c.mean(axis=0) - thigh_center))
+            if d < best_dist:
+                best_dist = d
+                best = c
+
+        return best
+    except Exception:
+        return None
+
+
 def _thigh_circumference_smplx_style(
     vertices: np.ndarray,
     faces: Optional[np.ndarray],
-    thigh_vertex_idx: int,
+    landmark_indices: List[int],
     hip_joint: Optional[np.ndarray],
     knee_joint: Optional[np.ndarray],
     spine3_joint: Optional[np.ndarray] = None,
     thickness: float = 0.020,
-    isolation_radius_m: float = 0.16,
+    isolation_margin_m: float = 0.03,
+    min_isolation_radius_m: float = 0.12,
+    plane_anchor_idx: Optional[int] = None,
 ):
     """
     Compute thigh circumference (raw metres) for ONE side, SMPLX-style.
 
-    Returns (girth_m, pts_3d) where pts_3d are the isolated cross-section points
-    used for ring visualisation.
+    landmark_indices : list of vertex indices spread around the thigh
+                       cross-section (e.g. [16438, 16442, 16443, 16444]).
+                       Their centroid becomes the thigh centre; their spread
+                       determines the adaptive isolation radius.
+                       A single index is also valid (falls back to
+                       min_isolation_radius_m).
+
+    isolation_margin_m      : margin added beyond the landmark spread (metres).
+    min_isolation_radius_m  : floor radius used when only one landmark given.
+
+    Returns (girth_m, ring_3d) — same contract as chest/waist/hip.
     """
-    vertices = np.asarray(vertices, dtype=float)
-    hip_joint = np.asarray(hip_joint, dtype=float) if hip_joint is not None else None
+    vertices   = np.asarray(vertices,   dtype=float)
+    hip_joint  = np.asarray(hip_joint,  dtype=float) if hip_joint  is not None else None
     knee_joint = np.asarray(knee_joint, dtype=float) if knee_joint is not None else None
-    thigh_vertex = vertices[thigh_vertex_idx]
 
-    # A: Plane origin = thigh landmark vertex
-    plane_origin = thigh_vertex.copy()
+    # Compute thigh centre (centroid of all landmarks) and adaptive radius
+    landmark_pts = vertices[np.asarray(landmark_indices, dtype=int)]
+    thigh_center = landmark_pts.mean(axis=0)
+    dists = np.linalg.norm(landmark_pts - thigh_center, axis=1)
+    isolation_radius_m = float(max(dists.max() + isolation_margin_m,
+                                   min_isolation_radius_m))
 
-    # B: Plane normal = leg axis (spine3→knee preferred, hip→knee fallback, world-Y last)
-    if spine3_joint is not None and knee_joint is not None:
-        raw = np.asarray(spine3_joint, dtype=float) - knee_joint
-    elif hip_joint is not None and knee_joint is not None:
-        raw = hip_joint - knee_joint
+    # A: Plane origin = thigh landmark XZ but lowered to upper-mid thigh Y.
+    # Landmark vertices 16438-16444 sit at the groin/upper-thigh junction.
+    # A horizontal cut at that height spans BOTH legs as one connected loop.
+    # Dropping 30 % toward the knee puts the plane at the proper upper-mid
+    # thigh where the two legs are clearly separated → clean single-thigh ring.
+    # A: Plane origin — use hardcoded anchor vertex when available (exact, stable),
+    # otherwise fall back to 4 % offset from landmark centroid toward knee.
+    if plane_anchor_idx is not None and plane_anchor_idx < vertices.shape[0]:
+        plane_origin = vertices[plane_anchor_idx].copy()
     else:
-        raw = np.array([0.0, 1.0, 0.0])
-    norm_len = np.linalg.norm(raw)
-    plane_normal = raw / norm_len if norm_len > 1e-6 else np.array([0.0, 1.0, 0.0])
+        plane_origin = thigh_center.copy()
+        if knee_joint is not None:
+            k = np.asarray(knee_joint, dtype=float)
+            plane_origin[1] = float(thigh_center[1] * 0.96 + k[1] * 0.04)
+        else:
+            plane_origin[1] = float(thigh_center[1] - 0.10)
 
-    # C: Build plane UV axes
+    # B: Plane normal = world-Y (horizontal cut, like a tape measure).
+    # spine3→knee or hip→knee both create laterally-tilted planes whose UV axes
+    # are not axis-aligned; when the landmark cluster sits on the inner thigh,
+    # the outer-thigh arc falls outside the generous_r filter → half-ring.
+    # A horizontal cut keeps plane_u=[1,0,0], plane_v=[0,0,1] so UV distances
+    # equal physical XZ distances and the symmetric generous_r always captures
+    # the full thigh cross-section regardless of landmark bias direction.
+    plane_normal = np.array([0.0, 1.0, 0.0])
+
+    # C: Build plane UV axes (Gram-Schmidt — needed for tilted leg-axis plane)
     plane_u, plane_v = _build_plane_axes(plane_normal)
 
-    # D: Get cross-section points — trimesh exact slice first, slab fallback
-    pts: Optional[np.ndarray] = None
+    # D: TRIMESH PATH — UV-filtered ordered ring (one thigh only)
+    #    _trimesh_thigh_contour keeps only segments within isolation_radius_m
+    #    of the thigh CENTRE in UV space — adaptive to actual thigh width.
     if faces is not None:
-        pts = _trimesh_plane_slice(vertices, faces, plane_origin, plane_normal)
-    if pts is None or len(pts) < 12:
-        t = thickness
-        for _ in range(3):
-            pts = _slab_at_plane(vertices, plane_origin, plane_normal, t)
-            if len(pts) >= 12:
-                break
-            t *= 1.5
+        ring_3d = _trimesh_thigh_contour(
+            vertices, faces, plane_origin, plane_normal,
+            thigh_center, plane_u, plane_v, isolation_radius_m,
+        )
+        if ring_3d is not None and len(ring_3d) >= 3:
+            # Sort points by angle around the XZ centroid so the ring renders
+            # as a smooth closed loop without diagonal crossover segments.
+            # (plane is world-Y so XZ is the cut plane — angle sort is exact.)
+            cx = float(ring_3d[:, 0].mean())
+            cz = float(ring_3d[:, 2].mean())
+            angles = np.arctan2(ring_3d[:, 2] - cz, ring_3d[:, 0] - cx)
+            ring_3d = ring_3d[np.argsort(angles)]
+            diffs = np.diff(ring_3d, axis=0)
+            girth_m = float(np.linalg.norm(diffs, axis=1).sum())
+            girth_m += float(np.linalg.norm(ring_3d[-1] - ring_3d[0]))
+            return girth_m, ring_3d
+
+    # E: FALLBACK — slab → UV gate from thigh centre → convex hull → 3-D ring
+    pts: Optional[np.ndarray] = None
+    t = thickness
+    for _ in range(3):
+        pts = _slab_at_plane(vertices, plane_origin, plane_normal, t)
+        if pts is not None and len(pts) >= 12:
+            break
+        t *= 1.5
 
     if pts is None or len(pts) == 0:
         return 0.0, np.zeros((0, 3), dtype=float)
 
-    # E: Isolate this thigh (UV-space gate, not world XZ)
-    if hip_joint is not None:
-        pts = _isolate_single_thigh(
-            pts, thigh_vertex, hip_joint, plane_u, plane_v, isolation_radius_m
-        )
+    # UV-space gate centred on thigh_center — no hip_joint dependency
+    center_uv = np.array([float(np.dot(thigh_center, plane_u)),
+                           float(np.dot(thigh_center, plane_v))])
+    pts_uv = np.column_stack([pts @ plane_u, pts @ plane_v])
+    pts = pts[np.linalg.norm(pts_uv - center_uv, axis=1) <= isolation_radius_m]
 
-    # F: UV projection + hull perimeter
-    girth_m = _plane_hull_perimeter(pts, plane_u, plane_v) if len(pts) >= 3 else 0.0
-    return girth_m, pts
+    if len(pts) < 3:
+        return 0.0, np.zeros((0, 3), dtype=float)
+
+    girth_m = _plane_hull_perimeter(pts, plane_u, plane_v)
+
+    # Reconstruct ordered 3-D ring from 2-D convex hull for visualisation
+    pts_2d = np.column_stack([pts @ plane_u, pts @ plane_v])
+    hull_2d = _convex_hull(pts_2d)
+    if hull_2d is not None and len(hull_2d) >= 3:
+        plane_n_val = float(np.dot(plane_origin, plane_normal))
+        ring_3d = (
+            hull_2d[:, 0:1] * plane_u[np.newaxis, :]
+            + hull_2d[:, 1:2] * plane_v[np.newaxis, :]
+            + plane_n_val * plane_normal[np.newaxis, :]
+        )
+        return girth_m, ring_3d
+
+    return girth_m, np.zeros((0, 3), dtype=float)
 
 
 def _thigh_girth_both_sides(
     vertices: np.ndarray,
     faces: Optional[np.ndarray],
-    left_thigh_idx: int,
-    right_thigh_idx: int,
+    left_landmark_indices: List[int],
+    right_landmark_indices: List[int],
     left_hip_joint: Optional[np.ndarray],
     right_hip_joint: Optional[np.ndarray],
     left_knee_joint: Optional[np.ndarray],
     right_knee_joint: Optional[np.ndarray],
     spine3_joint: Optional[np.ndarray] = None,
     thickness: float = 0.020,
-    isolation_radius_m: float = 0.16,
+    left_plane_anchor_idx: Optional[int] = None,
+    right_plane_anchor_idx: Optional[int] = None,
 ):
-    """Compute average thigh girth for both sides. Returns (avg_girth_m, left_ring_pts)."""
+    """Compute left thigh girth and return (girth_m, left_ring_3d).
+    Right side is measured for averaging but its ring is not returned."""
     left_girth, left_ring = _thigh_circumference_smplx_style(
-        vertices, faces, left_thigh_idx, left_hip_joint, left_knee_joint,
-        spine3_joint, thickness, isolation_radius_m,
+        vertices, faces, left_landmark_indices,
+        left_hip_joint, left_knee_joint, spine3_joint, thickness,
+        plane_anchor_idx=left_plane_anchor_idx,
     )
     right_girth, _ = _thigh_circumference_smplx_style(
-        vertices, faces, right_thigh_idx, right_hip_joint, right_knee_joint,
-        spine3_joint, thickness, isolation_radius_m,
+        vertices, faces, right_landmark_indices,
+        right_hip_joint, right_knee_joint, spine3_joint, thickness,
+        plane_anchor_idx=right_plane_anchor_idx,
     )
     valid = [g for g in [left_girth, right_girth] if g and g > 0.0]
     avg_girth = float(np.mean(valid)) if valid else 0.0
@@ -970,6 +1112,159 @@ def _landmark_to_list(point: Optional[np.ndarray]) -> Optional[List[float]]:
     return point.astype(float).round(6).tolist()
 
 
+# ---------------------------------------------------------------------------
+# Inseam / Inside Leg Height helpers
+# ---------------------------------------------------------------------------
+
+def find_heel_vertex(vertices: np.ndarray, ankle_joint: np.ndarray, side: str = "left") -> int:
+    """Find and print the heel vertex index (run once, then hardcode result)."""
+    ankle = np.asarray(ankle_joint, dtype=float)
+    xz_dist = np.linalg.norm(vertices[:, [0, 2]] - ankle[[0, 2]], axis=1)
+    candidates = np.where(xz_dist <= 0.10)[0]
+    if len(candidates) < 5:
+        candidates = np.where(xz_dist <= 0.15)[0]
+    foot_mask = vertices[candidates, 1] <= ankle[1] + 0.01
+    if foot_mask.sum() > 0:
+        candidates = candidates[foot_mask]
+    min_y = vertices[candidates, 1].min()
+    at_floor = candidates[np.abs(vertices[candidates, 1] - min_y) < 0.005]
+    heel_idx = int(at_floor[np.argmax(vertices[at_floor, 2])])
+    pos = vertices[heel_idx]
+    print(f"[find_heel] {side} heel idx={heel_idx}  pos=x={pos[0]:.4f} y={pos[1]:.4f} z={pos[2]:.4f}")
+    print(f"[find_heel] Hardcode: {side.upper()}_HEEL_IDX = {heel_idx}")
+    return heel_idx
+
+
+def _inseam_projected(crotch_pt: np.ndarray, heel_pt: np.ndarray,
+                      knee_joint: Optional[np.ndarray] = None) -> float:
+    """Project crotch→heel onto leg axis direction (Method A — best)."""
+    crotch = np.asarray(crotch_pt, dtype=float)
+    heel   = np.asarray(heel_pt,   dtype=float)
+    vec    = crotch - heel
+    if knee_joint is not None:
+        knee = np.asarray(knee_joint, dtype=float)
+        axis = (crotch - knee) + (knee - heel)
+    else:
+        axis = vec.copy()
+    norm = float(np.linalg.norm(axis))
+    if norm < 1e-6:
+        return float(np.linalg.norm(vec))
+    return float(max(np.dot(vec, axis / norm), 0.0))
+
+
+def _inseam_euclidean(crotch_pt: np.ndarray, heel_pt: np.ndarray) -> float:
+    """Straight-line chord distance crotch→heel (Method B — matches SMPLX)."""
+    return float(np.linalg.norm(
+        np.asarray(crotch_pt, dtype=float) - np.asarray(heel_pt, dtype=float)
+    ))
+
+
+def _inseam_vertical(crotch_pt: np.ndarray, heel_pt: np.ndarray) -> float:
+    """Vertical Y-drop crotch→heel (Method C — weakest, upright pose only)."""
+    return float(abs(
+        np.asarray(crotch_pt, dtype=float)[1] - np.asarray(heel_pt, dtype=float)[1]
+    ))
+
+
+# ---------------------------------------------------------------------------
+# Arm / Sleeve Length helpers
+# ---------------------------------------------------------------------------
+
+def _arm_length_vertex_waypoint(
+    vertices: np.ndarray,
+    waypoint_indices: List[int],
+) -> float:
+    """
+    Arm length = sum of |v[i] → v[i+1]| for each consecutive pair in
+    waypoint_indices (ordered shoulder → ... → wrist).
+
+    Using multiple surface waypoints makes the path follow the arm surface
+    instead of cutting through the mesh interior.
+    """
+    total = 0.0
+    for i in range(len(waypoint_indices) - 1):
+        a = vertices[waypoint_indices[i]].astype(float)
+        b = vertices[waypoint_indices[i + 1]].astype(float)
+        total += float(np.linalg.norm(a - b))
+    return total
+
+
+# ---------------------------------------------------------------------------
+# Front body length — geodesic surface path (neck top → crotch)
+# ---------------------------------------------------------------------------
+
+def _build_mesh_adjacency(vertices: np.ndarray, faces: np.ndarray):
+    """
+    Vectorised scipy CSR graph where edge weight = Euclidean distance between
+    adjacent vertices.  Used as input to Dijkstra for geodesic path finding.
+
+    IMPORTANT — edge deduplication:
+    In a manifold mesh every interior edge is shared by exactly two faces.
+    Without deduplication, csr_matrix SUMS duplicate (row,col) entries, giving
+    interior edges weight 2×distance and making every Dijkstra distance 2× too
+    large.  We normalise each undirected edge to (min_idx, max_idx) and call
+    np.unique to keep one copy per physical edge before building the graph.
+    """
+    from scipy.sparse import csr_matrix
+
+    N = int(vertices.shape[0])
+    # Collect all half-edges from every face triangle
+    a0, a1, a2 = faces[:, 0], faces[:, 1], faces[:, 2]
+    pairs = np.concatenate([
+        np.stack([a0, a1], axis=1),
+        np.stack([a1, a2], axis=1),
+        np.stack([a2, a0], axis=1),
+    ])  # shape (3F, 2)
+
+    # Normalise to undirected edge (min, max) and deduplicate
+    edges = np.sort(pairs, axis=1)          # each row is (min_idx, max_idx)
+    edges = np.unique(edges, axis=0)        # one entry per physical edge
+
+    dists = np.linalg.norm(
+        vertices[edges[:, 0]].astype(float) - vertices[edges[:, 1]].astype(float),
+        axis=1,
+    )
+    # Add both directions for the undirected graph
+    rows = np.concatenate([edges[:, 0], edges[:, 1]])
+    cols = np.concatenate([edges[:, 1], edges[:, 0]])
+    data = np.concatenate([dists, dists])
+    return csr_matrix((data, (rows, cols)), shape=(N, N))
+
+
+def _geodesic_surface_path(
+    vertices: np.ndarray,
+    faces: np.ndarray,
+    start: int,
+    end: int,
+) -> Tuple[float, List[int]]:
+    """
+    Dijkstra shortest path along mesh surface triangles.
+
+    Returns
+    -------
+    (distance_metres, ordered_vertex_index_list)
+
+    Raises ImportError if scipy is unavailable.
+    """
+    from scipy.sparse.csgraph import dijkstra
+
+    graph = _build_mesh_adjacency(vertices, faces)
+    dist, pred = dijkstra(
+        csgraph=graph,
+        directed=False,
+        indices=start,
+        return_predecessors=True,
+    )
+    path: List[int] = []
+    cur = end
+    while cur != start and cur >= 0:
+        path.append(int(cur))
+        cur = int(pred[cur])
+    path.append(int(start))
+    path.reverse()
+    return float(dist[end]), path
+
+
 def compute_measurements(person_rig: Dict, target_height_cm: Optional[float] = None) -> Dict[str, object]:
     """Compute anthropometric measurements for a reconstructed person."""
     mesh = person_rig.get("mesh") or {}
@@ -992,17 +1287,44 @@ def compute_measurements(person_rig: Dict, target_height_cm: Optional[float] = N
         except Exception:
             pass
 
+    # Arm length — three surface vertex anchors (shoulder → elbow → wrist).
+    # SMPLX-equivalent: all endpoints are on the mesh surface (no joints).
+    # shoulder=7953 (acromion tip), elbow=13495 (elbow surface), wrist=13947 (ulnar styloid).
+    # Two-segment sum handles any arm pose, including slight A-pose bend.
+    _ARM_WAYPOINTS: List[int] = [7953, 13495, 13947]
+    _arm_valid = all(i < vertices.shape[0] for i in _ARM_WAYPOINTS)
+
     # Chest landmark vertex indices (known for the MHR mesh)
     _L_CHEST, _R_CHEST = 7380, 6156
     _chest_valid = int(_L_CHEST) < vertices.shape[0] and int(_R_CHEST) < vertices.shape[0]
+
+    # Neck top / shoulder top vertex (front neck–shoulder junction, MHR mesh).
+    # Used as the START point for front body length (geodesic to crotch).
+    _NECK_TOP_VERTEX_IDX: int = 1640
+
+    # Crotch vertex (hardcoded MHR index — identified via mesh explorer)
+    _CROTCH_VERTEX_IDX: int = 5726
+    # Heel vertices — hardcoded from find_heel_vertex() debug run.
+    _L_HEEL_IDX: int = 12415
+    _R_HEEL_IDX: int = 17865
 
     # Waist landmark vertex indices (known for the MHR mesh)
     _BELLY_BUTTON, _BACK_BELLY_BUTTON = 5707, 5750
     _waist_valid = int(_BELLY_BUTTON) < vertices.shape[0] and int(_BACK_BELLY_BUTTON) < vertices.shape[0]
 
-    # Thigh landmark vertex indices (known for the MHR mesh)
-    _L_THIGH, _R_THIGH = 7230, 5983
-    _thigh_valid = int(_L_THIGH) < vertices.shape[0] and int(_R_THIGH) < vertices.shape[0]
+    # Thigh landmark vertex indices (known for the MHR mesh).
+    # Multiple indices per side → centroid = true thigh centre,
+    # spread → adaptive isolation radius (self-sizing, not fixed 0.16 m).
+    _L_THIGH_IDXS: List[int] = [16438, 16442, 16443, 16444]
+    _R_THIGH_IDXS: List[int] = [11279]
+    # Hardcoded ring-anchor vertices — the exact mesh vertex closest to the
+    # desired cut height (identified via debug print, 4 % groin→knee offset).
+    _L_THIGH_RING_IDX: int = 16467   # left thigh ring anchor
+    _R_THIGH_RING_IDX: int = 11304   # right thigh ring anchor
+    _thigh_valid = (
+        all(i < vertices.shape[0] for i in _L_THIGH_IDXS)
+        and all(i < vertices.shape[0] for i in _R_THIGH_IDXS)
+    )
 
     ground_y = float(vertices[:, 1].min())
     head_idx = int(np.argmax(vertices[:, 1]))
@@ -1029,14 +1351,14 @@ def compute_measurements(person_rig: Dict, target_height_cm: Optional[float] = N
     right_shoulder = _coalesce_points(keypoint_map.get("right_shoulder"), joint_map.get("right_shoulder"))
     left_acromion = _coalesce_points(keypoint_map.get("left_acromion"), left_shoulder)
     right_acromion = _coalesce_points(keypoint_map.get("right_acromion"), right_shoulder)
-    left_hip = _coalesce_points(keypoint_map.get("left_hip"), joint_map.get("left_hip"))
-    right_hip = _coalesce_points(keypoint_map.get("right_hip"), joint_map.get("right_hip"))
-    left_knee = _coalesce_points(keypoint_map.get("left_knee"), joint_map.get("left_knee"))
-    right_knee = _coalesce_points(keypoint_map.get("right_knee"), joint_map.get("right_knee"))
-    left_ankle = _coalesce_points(keypoint_map.get("left_ankle"), joint_map.get("left_ankle"))
-    right_ankle = _coalesce_points(keypoint_map.get("right_ankle"), joint_map.get("right_ankle"))
-    left_elbow = _coalesce_points(keypoint_map.get("left_elbow"), joint_map.get("left_elbow"))
-    right_elbow = _coalesce_points(keypoint_map.get("right_elbow"), joint_map.get("right_elbow"))
+    left_hip = _coalesce_points(keypoint_map.get("left_hip"), joint_map.get("left_hip"), joint_map.get("left-hip"))
+    right_hip = _coalesce_points(keypoint_map.get("right_hip"), joint_map.get("right_hip"), joint_map.get("right-hip"))
+    left_knee = _coalesce_points(keypoint_map.get("left_knee"), joint_map.get("left_knee"), joint_map.get("left-knee"))
+    right_knee = _coalesce_points(keypoint_map.get("right_knee"), joint_map.get("right_knee"), joint_map.get("right-knee"))
+    left_ankle = _coalesce_points(keypoint_map.get("left_ankle"), joint_map.get("left_ankle"), joint_map.get("left-ankle"))
+    right_ankle = _coalesce_points(keypoint_map.get("right_ankle"), joint_map.get("right_ankle"), joint_map.get("right-ankle"))
+    left_elbow = _coalesce_points(keypoint_map.get("left_elbow"), joint_map.get("left_elbow"), joint_map.get("left-elbow"))
+    right_elbow = _coalesce_points(keypoint_map.get("right_elbow"), joint_map.get("right_elbow"), joint_map.get("right-elbow"))
     left_wrist = _coalesce_points(keypoint_map.get("left_wrist"), joint_map.get("left_wrist"), joint_map.get("left-wrist"))
     right_wrist = _coalesce_points(keypoint_map.get("right_wrist"), joint_map.get("right_wrist"), joint_map.get("right-wrist"))
     eye_point = _average_points([
@@ -1078,8 +1400,27 @@ def compute_measurements(person_rig: Dict, target_height_cm: Optional[float] = N
 
     calf_level_y = knee_level_y - 0.45 * (knee_level_y - ankle_level_y)
 
-    crotch_point = _crotch_point(vertices, hip_center, knee_level_y, ground_y)
-    inside_leg = (crotch_point[1] - ground_y) if crotch_point is not None else hip_level_y - ground_y
+    # Crotch point — hardcoded vertex (stable, no scan needed)
+    crotch_point = vertices[_CROTCH_VERTEX_IDX].copy() if _CROTCH_VERTEX_IDX < vertices.shape[0] else None
+
+    # Heel points — Option A (hardcoded vertex), B (ankle projected), C (vertical)
+    if _L_HEEL_IDX is not None and _L_HEEL_IDX < vertices.shape[0]:
+        _left_heel_pt = vertices[_L_HEEL_IDX].copy()
+        _heel_source  = "heel_vertex"
+    elif left_ankle is not None:
+        _left_heel_pt = np.array([left_ankle[0], ground_y, left_ankle[2]], dtype=float)
+        _heel_source  = "ankle_projected"
+    else:
+        _left_heel_pt = np.array([crotch_point[0] if crotch_point is not None else 0.0,
+                                   ground_y,
+                                   crotch_point[2] if crotch_point is not None else 0.0], dtype=float)
+        _heel_source  = "vertical_fallback"
+
+    # Inseam — Method A (projected along leg axis): best for posed figures
+    if crotch_point is not None:
+        inside_leg = _inseam_projected(crotch_point, _left_heel_pt, left_knee)
+    else:
+        inside_leg = hip_level_y - ground_y
 
     torso_center_x = hip_center[0] if hip_center is not None else 0.0
     axilla_level_y = hip_level_y + 0.7 * (torso_upper_y - hip_level_y)
@@ -1120,20 +1461,90 @@ def compute_measurements(person_rig: Dict, target_height_cm: Optional[float] = N
     wrist_girth_left = _limb_girth(vertices, left_wrist, wrist_level_y, radius=0.08, thickness=0.01)
     wrist_girth_right = _limb_girth(vertices, right_wrist, wrist_level_y, radius=0.08, thickness=0.01)
 
-    arm_length = None
-    if left_shoulder is not None and left_elbow is not None and left_wrist is not None:
-        arm_length = float(np.linalg.norm(left_shoulder - left_elbow) + np.linalg.norm(left_elbow - left_wrist))
-    elif right_shoulder is not None and right_elbow is not None and right_wrist is not None:
-        arm_length = float(np.linalg.norm(right_shoulder - right_elbow) + np.linalg.norm(right_elbow - right_wrist))
+    # Arm length — surface vertex waypoint method (shoulder→elbow→wrist vertices)
+    # All 3 are mesh surface vertices: more accurate than joint-chain approach.
+    if _arm_valid:
+        arm_length = _arm_length_vertex_waypoint(vertices, _ARM_WAYPOINTS)
+    else:
+        arm_length = None
 
-    shoulder_width = None
-    if left_acromion is not None and right_acromion is not None:
-        if neck_point is not None:
-            shoulder_width = float(
-                np.linalg.norm(left_acromion - neck_point) + np.linalg.norm(neck_point - right_acromion)
+    # Front body length — front-surface-constrained geodesic, neck-top → crotch.
+    #
+    # WHY MULTI-SEGMENT WAS WRONG:
+    #   The previous approach used unverified intermediate vertices (5696, 5717).
+    #   If any waypoint is on the back or side surface, that geodesic SEGMENT routes
+    #   around the body rather than straight down the front — each detour adds ~30-50 cm.
+    #   4 bad segments × ~30 cm each = the ~2x inflation observed (150 cm vs ~70 cm).
+    #
+    # THE FIX — front-hemisphere face filter:
+    #   1. Determine "front" Z direction from belly_button (5707) vs back_belly (5750).
+    #      These are confirmed front/back vertices from the waist measurement code.
+    #   2. Keep only mesh faces where ALL 3 vertices are on the front side of the mesh.
+    #   3. Run a single Dijkstra on the filtered front-only mesh.
+    #   Dijkstra on a front-only mesh physically cannot route around the back.
+    #
+    # THRESHOLD:
+    #   30% of the front-back half-depth toward the front.  This is deliberately
+    #   permissive — it excludes only the spine-side back faces, not the sides,
+    #   so the path can still follow the lateral chest/hip curves correctly.
+    #   If the filter makes start or end unreachable, falls back to unfiltered mesh.
+    _sc_valid = (
+        _NECK_TOP_VERTEX_IDX < vertices.shape[0]
+        and _CROTCH_VERTEX_IDX < vertices.shape[0]
+        and _BELLY_BUTTON < vertices.shape[0]
+        and _BACK_BELLY_BUTTON < vertices.shape[0]
+        and _faces_arr is not None
+        and len(_faces_arr) > 0
+    )
+    _sc_path_indices: List[int] = []
+    shoulder_to_crotch_raw: Optional[float] = None
+    if _sc_valid:
+        try:
+            _verts_f = vertices.astype(float)
+
+            # --- Determine front Z direction ---
+            _belly_z  = float(_verts_f[_BELLY_BUTTON,      2])
+            _backb_z  = float(_verts_f[_BACK_BELLY_BUTTON, 2])
+            _front_sign = np.sign(_belly_z - _backb_z)   # +1 if front=+Z, -1 if front=−Z
+            _center_z   = (_belly_z + _backb_z) / 2.0
+            _half_d     = abs(_belly_z - _center_z)
+
+            # --- Build front-face mask (permissive: 30% toward front) ---
+            _z_thresh  = _center_z + _front_sign * _half_d * 0.3
+            _face_zs   = _verts_f[_faces_arr, 2]   # (F, 3)
+            if _front_sign >= 0:
+                _front_mask = np.all(_face_zs >= _z_thresh, axis=1)
+            else:
+                _front_mask = np.all(_face_zs <= _z_thresh, axis=1)
+            _front_faces = _faces_arr[_front_mask]
+
+            # --- Verify start & end are reachable in filtered graph ---
+            _front_vset = set(int(i) for i in _front_faces.flatten())
+            _sc_faces = (
+                _front_faces
+                if (_NECK_TOP_VERTEX_IDX in _front_vset and _CROTCH_VERTEX_IDX in _front_vset)
+                else _faces_arr   # last-resort fallback — unfiltered
             )
-        else:
-            shoulder_width = float(np.linalg.norm(left_acromion - right_acromion))
+
+            # --- Single Dijkstra on front-only mesh ---
+            _sc_dist, _sc_path_indices = _geodesic_surface_path(
+                _verts_f, _sc_faces, _NECK_TOP_VERTEX_IDX, _CROTCH_VERTEX_IDX
+            )
+
+            # Sanity: surface distance must be >= straight-line chord
+            _sc_chord = float(np.linalg.norm(
+                _verts_f[_NECK_TOP_VERTEX_IDX] - _verts_f[_CROTCH_VERTEX_IDX]
+            ))
+            if _sc_dist >= _sc_chord * 0.98:
+                shoulder_to_crotch_raw = _sc_dist
+            else:
+                shoulder_to_crotch_raw = None
+                _sc_path_indices = []
+        except Exception:
+            shoulder_to_crotch_raw = None
+            _sc_path_indices = []
+
+    # shoulder_width / _shoulder_breadth_arc initialised in the combined ring block below
 
     back_width = None
     if left_axilla_back is not None and right_axilla_back is not None:
@@ -1226,6 +1637,88 @@ def compute_measurements(person_rig: Dict, target_height_cm: Optional[float] = N
         _bust_girth_m = _section_circumference(vertices, bust_level_y, 0.02)
         _chest_ring_3d = np.zeros((0, 3), dtype=float)
 
+    # ── Shoulder ring + breadth ───────────────────────────────────────────────
+    # ROOT CAUSE OF ALL PREVIOUS FAILURES:
+    #   _trimesh_chest_contour picks the contour whose *centroid* is closest to
+    #   the landmark point.  Passing vertex 7953 (left acromion, X≈−0.2 m) as
+    #   the landmark caused it to return the LEFT ARM loop (small, off-centre),
+    #   not the torso ring that spans the full shoulder width.
+    #
+    # FIX applied here:
+    #   • Y-level = average of *both* acromion vertices (7952 left, 6615 right)
+    #     → correct horizontal plane regardless of slight Y asymmetry
+    #   • landmark = body centre at shoulder height (X = midpoint of acromion X
+    #     positions ≈ 0, Z = mid of front/back anchors, shifted 3 cm posteriorly)
+    #     → torso contour centroid is always closest to the body centre, so the
+    #     torso ring is guaranteed to be selected
+    #   • back arc (max-X → min-X via posterior Z) = shoulder breadth surface path
+    _SHOULDER_RING_V: int = 7953  # kept for landmarks export
+    _L_SHOULDER_V: int    = 7952  # left acromion surface vertex
+    _R_SHOULDER_V: int    = 6615  # right acromion surface vertex
+    _shoulder_ring_3d:     np.ndarray      = np.zeros((0, 3), dtype=float)
+    _shoulder_breadth_arc: np.ndarray      = np.zeros((0, 3), dtype=float)
+    shoulder_width:        Optional[float] = None
+
+    if (_L_SHOULDER_V < vertices.shape[0] and
+            _R_SHOULDER_V < vertices.shape[0] and
+            _faces_arr is not None):
+        try:
+            _sh_vf = vertices.astype(float)
+
+            # Correct Y: average of both acromion vertices
+            _sh_y_lvl = (_sh_vf[_L_SHOULDER_V, 1] + _sh_vf[_R_SHOULDER_V, 1]) / 2.0
+
+            # Body centre XZ:
+            #   X = midpoint of both acromion vertices (≈ 0 for symmetric body)
+            #   Z = midpoint of belly_button / back_belly anchors
+            _sh_ctr_x     = (_sh_vf[_L_SHOULDER_V, 0] + _sh_vf[_R_SHOULDER_V, 0]) / 2.0
+            _sh_belly_z_v = float(_sh_vf[_BELLY_BUTTON, 2])
+            _sh_back_z_v  = float(_sh_vf[_BACK_BELLY_BUTTON, 2])
+            _sh_ctr_z     = (_sh_belly_z_v + _sh_back_z_v) / 2.0
+
+            # Plane origin at the body centre at correct shoulder height
+            _sh_plane_org = np.array([_sh_ctr_x, _sh_y_lvl, _sh_ctr_z])
+
+            # Landmark shifted 3 cm toward the back → torso ring centroid is
+            # closest, so _trimesh_chest_contour reliably returns the torso ring
+            _sh_back_dir_z = np.sign(_sh_back_z_v - _sh_belly_z_v)
+            _sh_landmark   = np.array([_sh_ctr_x, _sh_y_lvl,
+                                       _sh_ctr_z + _sh_back_dir_z * 0.03])
+
+            _sh_new_ring = _trimesh_chest_contour(
+                _sh_vf, _faces_arr,
+                _sh_plane_org,
+                np.array([0.0, 1.0, 0.0]),
+                _sh_landmark,
+                exclusion_xz=None,
+            )
+
+            if _sh_new_ring is not None and len(_sh_new_ring) >= 4:
+                _shoulder_ring_3d = _sh_new_ring
+
+                # Widest lateral extent of the torso ring at shoulder height
+                _sba_ri = int(np.argmax(_sh_new_ring[:, 0]))  # max X = right side
+                _sba_li = int(np.argmin(_sh_new_ring[:, 0]))  # min X = left side
+
+                def _arc_seg(r: np.ndarray, a: int, b: int) -> np.ndarray:
+                    return r[a:b+1] if a <= b else np.concatenate([r[a:], r[:b+1]])
+
+                _arc_a = _arc_seg(_sh_new_ring, _sba_ri, _sba_li)
+                _arc_b = _arc_seg(_sh_new_ring, _sba_li, _sba_ri)
+
+                # Pick the arc whose mean Z is closer to the posterior anchor
+                _za = float(_arc_a[:, 2].mean())
+                _zb = float(_arc_b[:, 2].mean())
+                _shoulder_breadth_arc = (
+                    _arc_a if abs(_za - _sh_back_z_v) <= abs(_zb - _sh_back_z_v)
+                    else _arc_b
+                )
+
+                _sba_diffs = _shoulder_breadth_arc[1:] - _shoulder_breadth_arc[:-1]
+                shoulder_width = float(np.linalg.norm(_sba_diffs, axis=1).sum())
+        except Exception:
+            pass  # shoulder_width = None, _shoulder_breadth_arc = empty
+
     # SMPLX-style waist girth: sagittal anchor, spine3 plane, trimesh contour
     # for hand exclusion (same _trimesh_chest_contour mechanism as chest).
     if _waist_valid:
@@ -1309,15 +1802,16 @@ def compute_measurements(person_rig: Dict, target_height_cm: Optional[float] = N
         _thigh_girth_m, _left_thigh_ring_3d = _thigh_girth_both_sides(
             vertices=vertices,
             faces=_faces_arr,
-            left_thigh_idx=_L_THIGH,
-            right_thigh_idx=_R_THIGH,
+            left_landmark_indices=_L_THIGH_IDXS,
+            right_landmark_indices=_R_THIGH_IDXS,
             left_hip_joint=left_hip,
             right_hip_joint=right_hip,
             left_knee_joint=left_knee,
             right_knee_joint=right_knee,
             spine3_joint=_spine3_pt,
             thickness=0.020,
-            isolation_radius_m=0.16,
+            left_plane_anchor_idx=_L_THIGH_RING_IDX,
+            right_plane_anchor_idx=_R_THIGH_RING_IDX,
         )
 
     raw_measurements: Dict[str, Optional[float]] = {
@@ -1345,6 +1839,7 @@ def compute_measurements(person_rig: Dict, target_height_cm: Optional[float] = N
         "chest_width": chest_width,
         "arm_length": arm_length,
         "total_crotch_length": total_crotch_length,
+        "shoulder_to_crotch": shoulder_to_crotch_raw,
         "shoulder_slope": shoulder_slope,
     }
 
@@ -1376,6 +1871,15 @@ def compute_measurements(person_rig: Dict, target_height_cm: Optional[float] = N
         "waist_level": round(float(waist_level_y), 5),
         "hip_level": round(float(hip_level_y), 5),
         "crotch": _landmark_to_list(crotch_point),
+        # Inseam endpoints for 3D visualization
+        "inseam_crotch_landmark": _landmark_to_list(crotch_point),
+        "inseam_heel_landmark": _landmark_to_list(_left_heel_pt),
+        # Arm length waypoints for 3D visualization (ordered shoulder → wrist)
+        "arm_waypoints": [vertices[i].astype(float).round(6).tolist() for i in _ARM_WAYPOINTS] if _arm_valid else [],
+        # Shoulder breadth — back arc of the shoulder ring (horizontal cross-section)
+        "shoulder_breadth_path": _shoulder_breadth_arc.round(6).tolist() if len(_shoulder_breadth_arc) > 0 else [],
+        "shoulder_left_landmark":  _shoulder_breadth_arc[-1].round(6).tolist() if len(_shoulder_breadth_arc) > 0 else None,
+        "shoulder_right_landmark": _shoulder_breadth_arc[0].round(6).tolist()  if len(_shoulder_breadth_arc) > 0 else None,
         "lateral_malleolus_left": _landmark_to_list(left_ankle),
         "lateral_malleolus_right": _landmark_to_list(right_ankle),
         # Chest ring visualization data (SMPLX-style)
@@ -1400,7 +1904,21 @@ def compute_measurements(person_rig: Dict, target_height_cm: Optional[float] = N
         "pubic_bone_landmark": vertices[_pubic_bone_idx].astype(float).round(6).tolist(),
         # Left thigh ring visualization data (SMPLX-style)
         "left_thigh_ring_points": _left_thigh_ring_3d.round(6).tolist() if len(_left_thigh_ring_3d) > 0 else [],
-        "left_thigh_landmark": vertices[_L_THIGH].astype(float).round(6).tolist() if _thigh_valid else None,
+        "left_thigh_landmark": vertices[_L_THIGH_IDXS].mean(axis=0).astype(float).round(6).tolist() if _thigh_valid else None,
+        # Front body length — geodesic surface path for 3D visualization.
+        # Subsampled to ≤200 points to keep JSON payload small.
+        "shoulder_to_crotch_path": (
+            [vertices[i].astype(float).round(6).tolist()
+             for i in _sc_path_indices[::max(1, len(_sc_path_indices) // 200)]]
+            if _sc_path_indices else []
+        ),
+        # Endpoint landmarks (neck top + crotch) — confirmed front-surface vertices
+        "neck_top_landmark": vertices[_NECK_TOP_VERTEX_IDX].astype(float).round(6).tolist() if _sc_valid else None,
+        # belly_button shown as mid-path anchor dot (confirmed front vertex)
+        "front_waist_midline_landmark": vertices[_BELLY_BUTTON].astype(float).round(6).tolist() if _sc_valid else None,
+        # Shoulder-level ring — horizontal cross-section through vertex 7953
+        "shoulder_ring_points": _shoulder_ring_3d.round(6).tolist() if len(_shoulder_ring_3d) > 0 else [],
+        "shoulder_ring_landmark": vertices[_SHOULDER_RING_V].astype(float).round(6).tolist() if _SHOULDER_RING_V < vertices.shape[0] else None,
     }
 
     schema = {

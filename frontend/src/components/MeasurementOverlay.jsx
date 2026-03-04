@@ -31,7 +31,7 @@ const MEASUREMENT_GROUPS = [
   },
   {
     key: 'special',
-    keys: ['arm_length', 'total_crotch_length']
+    keys: ['arm_length', 'total_crotch_length', 'shoulder_to_crotch']
   },
   {
     key: 'angle',

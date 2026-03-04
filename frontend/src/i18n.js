@@ -194,11 +194,12 @@ export const translations = {
       ankle_girth: "Ankle Girth",
       upper_arm_girth: "Upper Arm Girth",
       wrist_girth: "Wrist Girth",
-      shoulder_width: "Shoulder Width (C7 arc)",
+      shoulder_width: "Shoulder Breadth",
       back_width: "Back Width",
       chest_width: "Chest Width",
       arm_length: "Arm / Sleeve Length",
       total_crotch_length: "Total Crotch Length",
+      shoulder_to_crotch: "Front Body Length",
       shoulder_slope: "Shoulder Slope"
     },
     measurementDescriptions: {
@@ -221,11 +222,12 @@ export const translations = {
       ankle_girth: "Smallest girth above the lateral malleolus – hem opening.",
       upper_arm_girth: "Midpoint between axilla and acromion – sleeve fullness.",
       wrist_girth: "Circumference at ulnar styloid – cuff opening.",
-      shoulder_width: "ISO arc along the back from left to right acromion via C7.",
+      shoulder_width: "Geodesic surface path across the back from right to left acromion tip.",
       back_width: "Surface distance between posterior axilla points.",
       chest_width: "Surface distance between anterior axilla points.",
       arm_length: "Surface path shoulder → elbow → wrist, arm slightly bent.",
       total_crotch_length: "Front waist center through crotch to back waist center.",
+      shoulder_to_crotch: "Geodesic surface path neck-top → chest → waist → hip → crotch. Follows the front skin surface like a tailor's tape.",
       shoulder_slope: "Angle between side-neck → acromion vector and the horizontal plane."
     }
   },
@@ -362,11 +364,12 @@ export const translations = {
       ankle_girth: "踝围",
       upper_arm_girth: "上臂围",
       wrist_girth: "腕围",
-      shoulder_width: "肩宽（过 C7 弧长）",
+      shoulder_width: "肩宽（后背测地线）",
       back_width: "背宽",
       chest_width: "胸宽",
       arm_length: "臂长 / 袖长",
       total_crotch_length: "全裆长",
+      shoulder_to_crotch: "前身长",
       shoulder_slope: "肩斜度"
     },
     measurementDescriptions: {
@@ -389,11 +392,12 @@ export const translations = {
       ankle_girth: "外踝骨上方的最小围度（裤脚口）。",
       upper_arm_girth: "腋下与肩峰连线中点的围度（袖肥）。",
       wrist_girth: "尺骨茎突处的围度（袖口）。",
-      shoulder_width: "按照 ISO，左 / 右肩峰点经颈椎点 C7 的后背弧长。",
+      shoulder_width: "沿后背表面从右肩峰点到左肩峰点的测地线距离。",
       back_width: "两腋后点之间的水平表面距离。",
       chest_width: "两腋前点之间的水平表面距离。",
       arm_length: "肩峰点 → 肘点 → 腕点的表面距离，手臂微弯。",
       total_crotch_length: "前腰中心穿过裆底连接后腰中心的表面距离。",
+      shoulder_to_crotch: "沿前身表面的测地线距离：颈上点 → 胸前中线 → 腰前中线 → 臀前中线 → 裆点，与软尺贴合前身测量一致。",
       shoulder_slope: "颈侧点到肩峰点向量与水平面的夹角。"
     }
   }

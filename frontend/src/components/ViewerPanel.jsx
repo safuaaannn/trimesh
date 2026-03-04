@@ -28,6 +28,11 @@ export default function ViewerPanel({
   const waistVisualsRef = useRef(null) // Waist ring + landmark spheres
   const hipVisualsRef = useRef(null)   // Hip ring + pubic bone landmark sphere
   const thighVisualsRef = useRef(null) // Left thigh ring + landmark sphere
+  const inseamVisualsRef = useRef(null) // Inseam line + crotch/heel spheres
+  const armVisualsRef = useRef(null)   // Arm length line + 3 vertex spheres
+  const shoulderBreadthVisualsRef = useRef(null) // Shoulder breadth geodesic path over back surface
+  const frontBodyVisualsRef = useRef(null) // Front body geodesic path + endpoint dots
+  const shoulderRingVisualsRef = useRef(null) // Shoulder-level horizontal ring (vertex 7953)
   const waistCutVisualsRef = useRef(null) // Waist slab vertex point cloud (debug)
   const [error, setError] = useState(null)
   const [isLoading, setIsLoading] = useState(false)
@@ -257,6 +262,46 @@ export default function ViewerPanel({
           if (child.material) child.material.dispose()
         })
         thighVisualsRef.current = null
+      }
+      if (inseamVisualsRef.current) {
+        scene.remove(inseamVisualsRef.current)
+        inseamVisualsRef.current.traverse(child => {
+          if (child.geometry) child.geometry.dispose()
+          if (child.material) child.material.dispose()
+        })
+        inseamVisualsRef.current = null
+      }
+      if (armVisualsRef.current) {
+        scene.remove(armVisualsRef.current)
+        armVisualsRef.current.traverse(child => {
+          if (child.geometry) child.geometry.dispose()
+          if (child.material) child.material.dispose()
+        })
+        armVisualsRef.current = null
+      }
+      if (shoulderBreadthVisualsRef.current) {
+        scene.remove(shoulderBreadthVisualsRef.current)
+        shoulderBreadthVisualsRef.current.traverse(child => {
+          if (child.geometry) child.geometry.dispose()
+          if (child.material) child.material.dispose()
+        })
+        shoulderBreadthVisualsRef.current = null
+      }
+      if (frontBodyVisualsRef.current) {
+        scene.remove(frontBodyVisualsRef.current)
+        frontBodyVisualsRef.current.traverse(child => {
+          if (child.geometry) child.geometry.dispose()
+          if (child.material) child.material.dispose()
+        })
+        frontBodyVisualsRef.current = null
+      }
+      if (shoulderRingVisualsRef.current) {
+        scene.remove(shoulderRingVisualsRef.current)
+        shoulderRingVisualsRef.current.traverse(child => {
+          if (child.geometry) child.geometry.dispose()
+          if (child.material) child.material.dispose()
+        })
+        shoulderRingVisualsRef.current = null
       }
       if (waistCutVisualsRef.current) {
         scene.remove(waistCutVisualsRef.current)
@@ -1096,6 +1141,273 @@ export default function ViewerPanel({
 
     scene.add(group)
     thighVisualsRef.current = group
+  }, [measurementData, selectedPerson])
+
+  // Inseam line + crotch sphere + heel sphere
+  useEffect(() => {
+    const scene = sceneRef.current
+    if (!scene) return
+
+    if (inseamVisualsRef.current) {
+      scene.remove(inseamVisualsRef.current)
+      inseamVisualsRef.current.traverse(child => {
+        if (child.geometry) child.geometry.dispose()
+        if (child.material) child.material.dispose()
+      })
+      inseamVisualsRef.current = null
+    }
+
+    const landmarks = measurementData?.landmarks
+    if (!landmarks) return
+
+    const crotchPt = landmarks.inseam_crotch_landmark
+    const heelPt   = landmarks.inseam_heel_landmark
+    if (!crotchPt && !heelPt) return
+
+    const personData = personsRef.current[selectedPerson]
+    if (!personData?.mesh) return
+
+    const group = new THREE.Group()
+    group.position.copy(personData.mesh.position)
+
+    // Line from crotch to heel — cyan to stand out from other markers
+    if (crotchPt && heelPt) {
+      const pts = new Float32Array([...crotchPt, ...heelPt])
+      const lineGeo = new THREE.BufferGeometry()
+      lineGeo.setAttribute('position', new THREE.BufferAttribute(pts, 3))
+      group.add(new THREE.Line(lineGeo, new THREE.LineBasicMaterial({ color: 0x00eeff, linewidth: 2 })))
+    }
+
+    // Crotch sphere — bright cyan
+    if (crotchPt) {
+      const s = new THREE.Mesh(
+        new THREE.SphereGeometry(0.018, 16, 16),
+        new THREE.MeshBasicMaterial({ color: 0x00eeff })
+      )
+      s.position.set(crotchPt[0], crotchPt[1], crotchPt[2])
+      group.add(s)
+    }
+
+    // Heel sphere — white
+    if (heelPt) {
+      const s = new THREE.Mesh(
+        new THREE.SphereGeometry(0.018, 16, 16),
+        new THREE.MeshBasicMaterial({ color: 0xffffff })
+      )
+      s.position.set(heelPt[0], heelPt[1], heelPt[2])
+      group.add(s)
+    }
+
+    scene.add(group)
+    inseamVisualsRef.current = group
+  }, [measurementData, selectedPerson])
+
+  // Arm length line + shoulder / elbow / wrist spheres (green)
+  useEffect(() => {
+    const scene = sceneRef.current
+    if (!scene) return
+
+    if (armVisualsRef.current) {
+      scene.remove(armVisualsRef.current)
+      armVisualsRef.current.traverse(child => {
+        if (child.geometry) child.geometry.dispose()
+        if (child.material) child.material.dispose()
+      })
+      armVisualsRef.current = null
+    }
+
+    const landmarks = measurementData?.landmarks
+    if (!landmarks) return
+
+    const waypoints = landmarks.arm_waypoints
+    if (!waypoints?.length) return
+
+    const personData = personsRef.current[selectedPerson]
+    if (!personData?.mesh) return
+
+    const group = new THREE.Group()
+    group.position.copy(personData.mesh.position)
+
+    // Line shoulder → elbow → wrist (lime green)
+    const pts = new Float32Array(waypoints.flatMap(p => p))
+    const lineGeo = new THREE.BufferGeometry()
+    lineGeo.setAttribute('position', new THREE.BufferAttribute(pts, 3))
+    group.add(new THREE.Line(lineGeo, new THREE.LineBasicMaterial({ color: 0x44ff88, linewidth: 2 })))
+
+    // Distinct sphere per anchor: shoulder=cyan, elbow=yellow, wrist=cyan
+    const DOT_COLORS = [0x00ddff, 0xffee00, 0x00ddff]
+    for (let i = 0; i < waypoints.length; i++) {
+      const pt = waypoints[i]
+      const color = DOT_COLORS[i] ?? 0x44ff88
+      const s = new THREE.Mesh(
+        new THREE.SphereGeometry(0.013, 16, 16),
+        new THREE.MeshBasicMaterial({ color })
+      )
+      s.position.set(pt[0], pt[1], pt[2])
+      group.add(s)
+    }
+
+    scene.add(group)
+    armVisualsRef.current = group
+  }, [measurementData, selectedPerson])
+
+  // Shoulder breadth — geodesic path over the back surface (right acromion → left acromion)
+  // Cyan-green line hugging the posterior shoulder/back; cyan endpoint dots.
+  useEffect(() => {
+    const scene = sceneRef.current
+    if (!scene) return
+
+    if (shoulderBreadthVisualsRef.current) {
+      scene.remove(shoulderBreadthVisualsRef.current)
+      shoulderBreadthVisualsRef.current.traverse(child => {
+        if (child.geometry) child.geometry.dispose()
+        if (child.material) child.material.dispose()
+      })
+      shoulderBreadthVisualsRef.current = null
+    }
+
+    const landmarks = measurementData?.landmarks
+    if (!landmarks) return
+
+    const pathPts = landmarks.shoulder_breadth_path
+    if (!pathPts?.length) return
+
+    const personData = personsRef.current[selectedPerson]
+    if (!personData?.mesh) return
+
+    const group = new THREE.Group()
+    group.position.copy(personData.mesh.position)
+
+    // Path line — cyan-green over the back surface
+    const positions = new Float32Array(pathPts.flat())
+    const lineGeo = new THREE.BufferGeometry()
+    lineGeo.setAttribute('position', new THREE.BufferAttribute(positions, 3))
+    group.add(new THREE.Line(lineGeo, new THREE.LineBasicMaterial({ color: 0x00ddaa, depthTest: false, linewidth: 2 })))
+
+    // Endpoint dots — left (lime) and right (yellow)
+    const addDot = (pt, color, r = 0.013) => {
+      if (!pt) return
+      const m = new THREE.Mesh(
+        new THREE.SphereGeometry(r, 10, 10),
+        new THREE.MeshBasicMaterial({ color, depthTest: false })
+      )
+      m.position.set(pt[0], pt[1], pt[2])
+      group.add(m)
+    }
+    addDot(landmarks.shoulder_left_landmark,  0x44ff44)  // left acromion — lime
+    addDot(landmarks.shoulder_right_landmark, 0xffff00)  // right acromion — yellow
+
+    scene.add(group)
+    shoulderBreadthVisualsRef.current = group
+  }, [measurementData, selectedPerson])
+
+  // Front body length — geodesic surface path (neck top → crotch)
+  // Draws the actual surface path the tape measure would follow on the front body.
+  useEffect(() => {
+    const scene = sceneRef.current
+    if (!scene) return
+
+    if (frontBodyVisualsRef.current) {
+      scene.remove(frontBodyVisualsRef.current)
+      frontBodyVisualsRef.current.traverse(child => {
+        if (child.geometry) child.geometry.dispose()
+        if (child.material) child.material.dispose()
+      })
+      frontBodyVisualsRef.current = null
+    }
+
+    const landmarks = measurementData?.landmarks
+    if (!landmarks) return
+
+    const pathPts    = landmarks.shoulder_to_crotch_path
+    const neckPt     = landmarks.neck_top_landmark
+    const crotchPt   = landmarks.inseam_crotch_landmark
+    const waistMidPt = landmarks.front_waist_midline_landmark  // belly button (confirmed front)
+    if (!pathPts?.length && !neckPt) return
+
+    const personData = personsRef.current[selectedPerson]
+    if (!personData?.mesh) return
+
+    const group = new THREE.Group()
+    group.position.copy(personData.mesh.position)
+
+    // Geodesic polyline — front-constrained, orange-red
+    if (pathPts && pathPts.length >= 2) {
+      const posArr = new Float32Array(pathPts.flatMap(p => p))
+      const geo = new THREE.BufferGeometry()
+      geo.setAttribute('position', new THREE.BufferAttribute(posArr, 3))
+      group.add(new THREE.Line(geo, new THREE.LineBasicMaterial({ color: 0xff5500, linewidth: 2 })))
+    }
+
+    const addDot = (pt, color, radius = 0.013) => {
+      if (!pt) return
+      const s = new THREE.Mesh(
+        new THREE.SphereGeometry(radius, 16, 16),
+        new THREE.MeshBasicMaterial({ color })
+      )
+      s.position.set(pt[0], pt[1], pt[2])
+      group.add(s)
+    }
+
+    addDot(neckPt,     0xffffff, 0.015)  // neck top — white
+    addDot(crotchPt,   0xff5500, 0.015)  // crotch — orange-red
+    addDot(waistMidPt, 0xffaa00)         // belly button mid-anchor — amber
+
+    scene.add(group)
+    frontBodyVisualsRef.current = group
+  }, [measurementData, selectedPerson])
+
+  // Shoulder ring — horizontal cross-section through vertex 7953 (bright purple)
+  useEffect(() => {
+    const scene = sceneRef.current
+    if (!scene) return
+
+    if (shoulderRingVisualsRef.current) {
+      scene.remove(shoulderRingVisualsRef.current)
+      shoulderRingVisualsRef.current.traverse(child => {
+        if (child.geometry) child.geometry.dispose()
+        if (child.material) child.material.dispose()
+      })
+      shoulderRingVisualsRef.current = null
+    }
+
+    const ringPts = measurementData?.landmarks?.shoulder_ring_points
+    const landmarkPt = measurementData?.landmarks?.shoulder_ring_landmark
+    if (!ringPts?.length) return
+
+    const personData = personsRef.current[selectedPerson]
+    if (!personData?.mesh) return
+
+    const group = new THREE.Group()
+    group.position.copy(personData.mesh.position)
+
+    const addDot = (pt, color, r = 0.012) => {
+      if (!pt) return
+      const mesh = new THREE.Mesh(
+        new THREE.SphereGeometry(r, 10, 10),
+        new THREE.MeshBasicMaterial({ color, depthTest: false })
+      )
+      mesh.position.set(pt[0], pt[1], pt[2])
+      group.add(mesh)
+    }
+
+    // Ring line
+    const positions = new Float32Array(ringPts.flat())
+    // Close the loop
+    const closed = new Float32Array(positions.length + 3)
+    closed.set(positions)
+    closed[positions.length]     = positions[0]
+    closed[positions.length + 1] = positions[1]
+    closed[positions.length + 2] = positions[2]
+    const ringGeo = new THREE.BufferGeometry()
+    ringGeo.setAttribute('position', new THREE.BufferAttribute(closed, 3))
+    group.add(new THREE.Line(ringGeo, new THREE.LineBasicMaterial({ color: 0xaa44ff, depthTest: false, linewidth: 2 })))
+
+    // Landmark dot at vertex 7953
+    addDot(landmarkPt, 0xcc88ff, 0.014)
+
+    scene.add(group)
+    shoulderRingVisualsRef.current = group
   }, [measurementData, selectedPerson])
 
   // Waist slab vertex debug visualisation — shows every mesh vertex that lies
