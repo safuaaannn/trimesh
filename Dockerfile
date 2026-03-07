@@ -119,8 +119,8 @@ WORKDIR /app
 # 创建必要的目录
 RUN mkdir -p uploads outputs data
 
-# 暴露端口
-EXPOSE 5000
+# 暴露端口 (5000=Flask legacy, 8000=FastAPI production)
+EXPOSE 5000 8000
 
 # 设置启动脚本（先复制，然后转换行尾符并设置权限）
 # 注意：Windows 文件可能有 CRLF 行尾符，需要转换为 LF
@@ -131,5 +131,5 @@ RUN sed -i 's/\r$//' /tmp/docker-entrypoint.sh && \
 
 # 启动命令
 ENTRYPOINT ["/usr/local/bin/docker-entrypoint.sh"]
-CMD ["python3", "app.py"]
+CMD ["python3", "-m", "uvicorn", "api.main:app", "--host", "0.0.0.0", "--port", "8000"]
 

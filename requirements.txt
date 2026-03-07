@@ -1,5 +1,9 @@
 flask
 flask-cors
+fastapi
+uvicorn[standard]
+python-multipart
+pydantic>=2.0
 opencv-python
 numpy
 trimesh
