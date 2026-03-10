@@ -570,7 +570,27 @@ def calculate_measurements():
             return jsonify({"error": "target_height_cm must be numeric"}), 400
 
     try:
-        result = compute_measurements(rig_data[person_index], target_height_cm=target_height_cm)
+        person_rig = rig_data[person_index]
+
+        # Check for baked (slider-deformed) vertices from frontend
+        baked_vertices = payload.get("baked_vertices")
+        if baked_vertices is not None:
+            # User has slider-adjusted the mesh — swap in baked vertices
+            measurement_rig = {
+                "mesh": {
+                    **person_rig["mesh"],
+                    "vertices": baked_vertices,
+                },
+                "skeleton": person_rig["skeleton"],
+                "animation_targets": person_rig.get("animation_targets", {}),
+                "keypoints": person_rig.get("keypoints", []),
+                "metadata": person_rig.get("metadata", {}),
+            }
+            print(f"[Measurements] Using BAKED vertices ({len(baked_vertices)} verts) for person {person_index}")
+        else:
+            measurement_rig = person_rig
+
+        result = compute_measurements(measurement_rig, target_height_cm=target_height_cm)
         result.update({
             "session_id": session_id,
             "person_index": person_index,
@@ -580,6 +600,8 @@ def calculate_measurements():
         return jsonify({"error": str(err)}), 422
     except Exception as exc:
         print(f"[Measurements] Failed for session {session_id}: {exc}")
+        import traceback
+        traceback.print_exc()
         return jsonify({"error": "Failed to compute measurements"}), 500
 
 

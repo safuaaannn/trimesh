@@ -1,0 +1,71 @@
+# MHR Zero-Pose Validation & Measurement Quality Audit
+
+Validate that setting MHR pose parameters to zero produces a clean A-pose mesh suitable for body measurements, and audit measurement accuracy between posed and zero-pose meshes.
+
+## Proposed Changes
+
+### Validation Script
+
+#### [NEW] [validate_zero_pose.py](file:///home/pj/Videos/Monocular_3D_human_body/validate_zero_pose.py)
+
+A standalone script that:
+
+1. **Loads the SAM-3D model** (reuses existing `setup_sam_3d_body`)
+2. **Runs inference** on a test image to get per-person output including `shape_params`, `body_pose_params`, `hand_pose_params`, etc.
+3. **Generates the zero-pose mesh** by:
+   - Keeping `shape_params` (β) and `expr_params` unchanged
+   - Setting `body_pose_params`, `hand_pose_params`, `global_rot` all to zero
+   - Calling `mhr_model.forward(identity_coeffs, zero_model_params, face_expr_coeffs)` with `apply_correctives=True`
+4. **Verifies correctives are near-zero** by also calling forward with `apply_correctives=False` and comparing the two outputs
+5. **Exports both meshes** as `.obj` files for visual comparison
+6. **Runs [compute_measurements()](file:///home/pj/Videos/Monocular_3D_human_body/sam_3d_body/measurements/body_metrics.py#1518-2205)** on both posed and zero-pose rigs, comparing all values
+7. **Generates a correctives heatmap** (matplotlib scatter plot showing per-vertex corrective displacement magnitude)
+
+Key implementation details:
+
+```python
+# Access the MHR model from the loaded estimator
+mhr_model = estimator.model.head_pose.mhr
+
+# SAM-3D person output fields used:
+#   shape_params      → identity_coeffs  (45 dims)
+#   body_pose_params  → body pose        (130 dims)  
+#   hand_pose_params  → hand pose        (108 dims)
+#   global_rot        → global rotation  (3 dims)
+#   scale_params      → scale            (varies)
+#   expr_params       → face_expr_coeffs (72 dims)
+
+# model_parameters = cat(global_rot, body_pose, hand_pose, scale)
+# For zero-pose: all components set to zeros
+```
+
+> [!IMPORTANT]
+> The validation script does **not** modify any existing code. It is a read-only diagnostic tool.
+
+## Verification Plan
+
+### Automated Tests
+
+Run the validation script:
+```bash
+cd /home/pj/Videos/Monocular_3D_human_body
+conda activate sam_3d_body
+python validate_zero_pose.py --image <path_to_test_image>
+```
+
+**Expected console output:**
+- `[PASS]` Zero-pose corrective magnitude < 0.001
+- `[PASS]` Height within ±1cm of expected
+- Measurement comparison table with `⚠️` flags for >5% discrepancy
+
+**Generated files:**
+- `validation_output/posed_mesh.obj` — original posed mesh
+- `validation_output/zero_pose_mesh.obj` — A-pose mesh
+- `validation_output/correctives_heatmap.png` — per-vertex displacement heatmap
+- `validation_output/report.txt` — full validation results
+
+### Manual Verification
+Open both OBJ files in a 3D viewer (e.g. MeshLab, Blender) to visually confirm:
+1. The zero-pose mesh is in a clean A-pose (arms ~45° from sides)
+2. No visible "fat and short" artifacts
+3. Body proportions look natural

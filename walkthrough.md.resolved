@@ -1,0 +1,205 @@
+# T-Pose Pipeline: How It Maps to Your Current Codebase
+
+## TL;DR
+
+**You already have 90% of this built.** The Gemini steps describe exactly what your existing [step1_sam3d_inference.py](file:///home/pj/Desktop/MHR/step1_sam3d_inference.py) → [step2_mhr_measurements.py](file:///home/pj/Desktop/MHR/step2_mhr_measurements.py) pipeline does, plus one simple addition: **zero out the pose parameters to get a T-pose mesh, then measure it.**
+
+---
+
+## Your Current Pipeline (What Already Works)
+
+```mermaid
+graph LR
+    A[Photo] --> B[Sam3D Inference]
+    B --> C["MHR Parameters<br/>β=identity_coeffs (45)<br/>θ=model_parameters (204)<br/>expr=face_expr_coeffs (72)"]
+    C --> D[MHR Model Forward]
+    D --> E[Posed Mesh + Skeleton]
+    E --> F[body_metrics.py<br/>compute_measurements]
+    F --> G[Measurements in cm]
+```
+
+| Gemini Step | What It Does | Your Existing Code |
+|---|---|---|
+| **Step 1: Initialize MHR** | Load MHR model at LOD 1 | `MHR.from_files(device="cpu", lod=1)` in [step2_mhr_measurements.py](file:///home/pj/Desktop/MHR/step2_mhr_measurements.py#L49-L51) |
+| **Step 2: Extract Parameters** | Fit β and θ to match scan | **Already done by Sam3D** — [step1_sam3d_inference.py](file:///home/pj/Desktop/MHR/step1_sam3d_inference.py) runs inference, saves `shape_params`, `mhr_model_params`, `expr_params` |
+| **Step 3: Lock Shape (β)** | Keep `identity_coeffs`, detach | Extract from Sam3D output — `identity_coeffs = sam3d_data['shape_params']` |
+| **Step 4: Reset to T-Pose** | Zero out `model_parameters` | **⬅️ The one new step: `torch.zeros(1, 204)`** |
+
+---
+
+## Step-by-Step: What Each Parameter Controls
+
+### In MHR's [forward()](file:///home/pj/Desktop/MHR/mhr/mhr.py#191-258) method
+
+```python
+# From /home/pj/Desktop/MHR/mhr/mhr.py line 191
+def forward(self, identity_coeffs, model_parameters, face_expr_coeffs):
+    # identity_coeffs → β = body SHAPE (height, weight, proportions) → 45 dims
+    # model_parameters → θ = body POSE (joint rotations, global rigid) → 204 dims  
+    # face_expr_coeffs → facial expressions → 72 dims
+```
+
+### The Key Insight
+
+- `identity_coeffs` (β) = **WHO the person is** — their unique body shape
+- `model_parameters` (θ) = **HOW they're standing** — arm angle, leg spread, torso twist
+- **Zeroing θ = T-Pose** — all joints at default rotation, arms straight out
+
+---
+
+## How to Implement T-Pose + Measurement
+
+### Option A: Modify [step2_mhr_measurements.py](file:///home/pj/Desktop/MHR/step2_mhr_measurements.py) (Standalone Script)
+
+Add a T-pose step after generating the posed mesh (around [line 56](file:///home/pj/Desktop/MHR/step2_mhr_measurements.py#L56)):
+
+```python
+# --- EXISTING: Generate POSED mesh (matches the photo) ---
+with torch.no_grad():
+    vertices_posed, skel_posed = mhr(identity_coeffs, model_parameters, face_expr_coeffs)
+
+# --- NEW: Generate T-POSE mesh (same body, neutral pose) ---
+tpose_params = torch.zeros(1, 204)  # Zero pose = T-pose
+with torch.no_grad():
+    vertices_tpose, skel_tpose = mhr(identity_coeffs, tpose_params, face_expr_coeffs)
+
+# The T-pose mesh has:
+#   ✅ Same body shape (identity_coeffs preserved)
+#   ✅ Arms straight out horizontally
+#   ✅ Legs straight, no twist
+#   ✅ Centered at origin
+```
+
+### Option B: Integrate Into the Main Pipeline ([api/pipeline.py](file:///home/pj/Videos/Monocular_3D_human_body/api/pipeline.py))
+
+The main pipeline at [pipeline.py](file:///home/pj/Videos/Monocular_3D_human_body/api/pipeline.py) uses Sam3D directly, and [process_image()](file:///home/pj/Videos/Monocular_3D_human_body/api/pipeline.py#216-273) builds a rig from the **posed** output. To add T-pose support:
+
+```python
+# In process_image(), after getting person_output from Sam3D:
+person_output = outputs[person_index]
+
+# Extract MHR params from Sam3D output
+shape_params = person_output['shape_params']       # β (45)
+mhr_model_params = person_output['mhr_model_params']  # θ (204)
+expr_params = person_output['expr_params']          # (72)
+
+# Generate T-pose mesh using the MHR model embedded in Sam3D
+mhr_model = self._estimator.model.head_pose.mhr
+identity_coeffs = torch.from_numpy(shape_params).unsqueeze(0).float()
+tpose_params = torch.zeros(1, 204)
+face_expr = torch.from_numpy(expr_params).unsqueeze(0).float()
+
+with torch.no_grad():
+    tpose_verts, tpose_skel = mhr_model(identity_coeffs, tpose_params, face_expr)
+
+# Now measure the T-pose mesh instead of the posed one
+```
+
+---
+
+## Measuring the T-Pose Mesh
+
+Once you have the T-pose vertices, you can measure using your existing `body_metrics.py::compute_measurements()`. The measurement system already handles the MHR mesh topology (all hardcoded vertex indices like `_L_CHEST=7380`, `_BELLY_BUTTON=5711`, etc. are MHR-compatible).
+
+### Complete Working Script
+
+```python
+#!/usr/bin/env python3
+"""Generate T-pose from Sam3D output and measure it."""
+import sys
+from pathlib import Path
+sys.path.insert(0, str(Path(__file__).parent))
+
+import pickle
+import torch
+import numpy as np
+from mhr.mhr import MHR
+from measurement_calculator import MeasurementCalculator
+
+
+def tpose_and_measure(sam3d_pkl_path: str, target_height_cm: float = 175.0):
+    # 1. Load Sam3D output (from step1)
+    with open(sam3d_pkl_path, 'rb') as f:
+        data = pickle.load(f)
+
+    # 2. Extract shape parameters (β) — KEEP THESE
+    identity_coeffs = torch.from_numpy(data['shape_params']).unsqueeze(0).float()
+    face_expr = torch.from_numpy(data['expr_params']).unsqueeze(0).float()
+
+    # 3. Create ZERO pose parameters (θ) — THIS IS THE T-POSE
+    tpose_params = torch.zeros(1, 204)
+
+    # 4. Load MHR and generate T-pose mesh
+    mhr = MHR.from_files(device=torch.device("cpu"), lod=1)
+    with torch.no_grad():
+        verts, skel = mhr(identity_coeffs, tpose_params, face_expr)
+
+    vertices = verts[0].numpy()
+    joints = skel[0, :, :3].numpy()
+    faces = mhr.character.mesh.faces
+    joint_names = mhr.character.skeleton.joint_names
+
+    # 5. Scale to target height
+    y_min, y_max = vertices[:, 1].min(), vertices[:, 1].max()
+    measured_height = y_max - y_min
+    scale = target_height_cm / measured_height
+    vertices_scaled = vertices * scale
+    joints_scaled = joints * scale
+
+    # 6. Measure using existing calculator
+    calc = MeasurementCalculator(
+        vertices=vertices_scaled,
+        faces=faces,
+        joints=joints_scaled,
+        joint_names=joint_names,
+        scale_factor=1.0,
+    )
+    measurements = calc.calculate_all_measurements()
+
+    # 7. Print results
+    labels = {
+        'A': 'Head Circumference', 'B': 'Neck Circumference',
+        'C': 'Shoulder to Crotch', 'D': 'Chest Circumference',
+        'E': 'Waist Circumference', 'F': 'Hip Circumference',
+        'G': 'Wrist Circumference', 'H': 'Bicep Circumference',
+        'I': 'Forearm Circumference', 'J': 'Arm Length',
+        'K': 'Inside Leg Height', 'L': 'Thigh Circumference',
+        'M': 'Calf Circumference', 'N': 'Ankle Circumference',
+        'O': 'Shoulder Breadth', 'P': 'Height',
+    }
+    print(f"\n{'='*50}")
+    print(f"T-POSE MEASUREMENTS (scaled to {target_height_cm} cm)")
+    print(f"{'='*50}")
+    for k in sorted(labels):
+        print(f"  {k} - {labels[k]:<30} {measurements.get(k, 0):.1f} cm")
+
+    return measurements
+
+
+if __name__ == "__main__":
+    import argparse
+    p = argparse.ArgumentParser()
+    p.add_argument("--pkl", required=True, help="Sam3D output .pkl")
+    p.add_argument("--height", type=float, default=175.0)
+    args = p.parse_args()
+    tpose_and_measure(args.pkl, args.height)
+```
+
+---
+
+## Why T-Pose Measurements Are Better for Sizing
+
+| Aspect | Posed Mesh | T-Pose Mesh |
+|---|---|---|
+| Chest girth | Arms may overlap torso slice | Arms clear of torso — clean ring |
+| Waist girth | Hands at waist height cause artifacts | Hands far from waist — no hand exclusion needed |
+| Arm length | Depends on accurate arm pose recovery | Standard pose — consistent length |
+| Shoulder width | Pose-dependent bone rotations | Neutral rotation — true structural width |
+| Inside leg | Leg angle introduces error | Legs straight down — clean vertical |
+
+> [!IMPORTANT]
+> The T-pose mesh uses the **same body shape** as the original scan (same `identity_coeffs`), so the person's actual proportions, weight, and build are preserved. Only the *posture* changes.
+
+## What About A-Pose Instead of T-Pose?
+
+T-pose (fully zeroed θ) puts arms at 90° horizontal. Some measurement systems prefer **A-pose** (arms ~30° from body). To get an A-pose, you'd set small nonzero values in the shoulder rotation components of `model_parameters` instead of full zeros. However, for circumference measurements, T-pose is ideal because arms are maximally separated from the torso.

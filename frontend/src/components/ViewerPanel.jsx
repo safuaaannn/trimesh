@@ -1,11 +1,11 @@
-import { useEffect, useRef, useState, useCallback } from 'react'
+import { useEffect, useRef, useState, useCallback, forwardRef, useImperativeHandle } from 'react'
 import * as THREE from 'three'
 import { OrbitControls } from 'three/examples/jsm/controls/OrbitControls.js'
 import { Box, Text } from '@radix-ui/themes'
 import { translations } from '../i18n'
 import './ViewerPanel.css'
 
-export default function ViewerPanel({
+const ViewerPanel = forwardRef(function ViewerPanel({
   allRigData,
   selectedPerson,
   onPersonSelect,
@@ -14,7 +14,7 @@ export default function ViewerPanel({
   showJoints,
   language,
   measurementData
-}) {
+}, ref) {
   const mountRef = useRef(null)
   const sceneRef = useRef(null)
   const cameraRef = useRef(null)
@@ -41,6 +41,53 @@ export default function ViewerPanel({
   const [hoveredVertex, setHoveredVertex] = useState(null) // { index, x, y }
 
   const t = translations[language]
+
+  // Expose bakeSkinnedVertices to parent via ref
+  useImperativeHandle(ref, () => ({
+    /**
+     * Extract deformed vertex positions from the GPU-skinned mesh.
+     * Uses Three.js SkinnedMesh.boneTransform() to read back each
+     * vertex position after bone rotations have been applied.
+     * Returns an array of [x, y, z] triples in LOCAL mesh space
+     * (same coordinate system as the original rig vertices).
+     */
+    bakeSkinnedVertices(personIndex) {
+      const personData = personsRef.current[personIndex]
+      if (!personData?.mesh) return null
+
+      const mesh = personData.mesh
+      const posAttr = mesh.geometry.getAttribute('position')
+      const vertexCount = posAttr.count
+      const bakedVertices = []
+      const target = new THREE.Vector3()
+
+      // Ensure all bone world matrices are current
+      mesh.updateMatrixWorld(true)
+
+      for (let i = 0; i < vertexCount; i++) {
+        // Load the original vertex position into target first
+        target.fromBufferAttribute(posAttr, i)
+
+        // Apply bone transforms (skinning) — this modifies target in-place
+        // Returns position in local mesh space (same coord system as original vertices)
+        if (mesh.applyBoneTransform) {
+          mesh.applyBoneTransform(i, target)
+        } else if (mesh.boneTransform) {
+          mesh.boneTransform(i, target)
+        }
+        // else: target already has the raw position from fromBufferAttribute
+
+        bakedVertices.push([
+          parseFloat(target.x.toFixed(6)),
+          parseFloat(target.y.toFixed(6)),
+          parseFloat(target.z.toFixed(6))
+        ])
+      }
+
+      console.log(`[Viewer] Baked ${vertexCount} vertices for person ${personIndex}`)
+      return bakedVertices
+    }
+  }), [])
 
   // Initialize Three.js scene once
   useEffect(() => {
@@ -512,19 +559,19 @@ export default function ViewerPanel({
         // Keep relative positions but center them and place all on ground
         if (metadata && metadata.root_translation) {
           const rootTrans = metadata.root_translation
-          
+
           // Calculate relative position from center (for X and Z)
           // Keep relative positions but center them around origin
           const relativeX = rootTrans[0] - centerX
           const relativeZ = rootTrans[2] - centerZ  // Use original Z before flipping
-          
+
           // Set position: relative X/Z, Y will be adjusted based on mesh bounds
           skinnedMesh.position.set(
             relativeX,         // X: relative to center (keep relative positions)
             0,                 // Y: temporary, will be adjusted below
             -relativeZ        // Z: flip Z and use relative position
           )
-          
+
           // Calculate mesh bounding box to find the lowest point (feet)
           // This is in local space (mesh origin is at neck)
           geometry.computeBoundingBox()
@@ -542,11 +589,11 @@ export default function ViewerPanel({
               note: 'Centered and placed on ground, keeping relative positions'
             })
           } else {
-          console.log(`[Viewer] Person ${personIndex} positioned at:`, {
-            original: rootTrans,
+            console.log(`[Viewer] Person ${personIndex} positioned at:`, {
+              original: rootTrans,
               relative: [relativeX, relativeZ],
               note: 'Could not compute bounding box, using relative position'
-          })
+            })
           }
         }
 
@@ -798,7 +845,7 @@ export default function ViewerPanel({
       const bone = selectedPersonData.bones[boneIdx]
       console.log(`[Viewer] Applying rotation to ${jointName} (bone ${boneIdx}):`, rotation)
       console.log(`[Viewer]   - Bone name: ${bone.name}, Parent: ${bone.parent?.name || 'none'}`)
-      
+
       // Apply rotation in local space
       bone.rotation.set(
         rotation.x || 0,
@@ -1161,7 +1208,7 @@ export default function ViewerPanel({
     if (!landmarks) return
 
     const crotchPt = landmarks.inseam_crotch_landmark
-    const heelPt   = landmarks.inseam_heel_landmark
+    const heelPt = landmarks.inseam_heel_landmark
     if (!crotchPt && !heelPt) return
 
     const personData = personsRef.current[selectedPerson]
@@ -1294,7 +1341,7 @@ export default function ViewerPanel({
       m.position.set(pt[0], pt[1], pt[2])
       group.add(m)
     }
-    addDot(landmarks.shoulder_left_landmark,  0x44ff44)  // left acromion — lime
+    addDot(landmarks.shoulder_left_landmark, 0x44ff44)  // left acromion — lime
     addDot(landmarks.shoulder_right_landmark, 0xffff00)  // right acromion — yellow
 
     scene.add(group)
@@ -1319,9 +1366,9 @@ export default function ViewerPanel({
     const landmarks = measurementData?.landmarks
     if (!landmarks) return
 
-    const pathPts    = landmarks.shoulder_to_crotch_path
-    const neckPt     = landmarks.neck_top_landmark
-    const crotchPt   = landmarks.inseam_crotch_landmark
+    const pathPts = landmarks.shoulder_to_crotch_path
+    const neckPt = landmarks.neck_top_landmark
+    const crotchPt = landmarks.inseam_crotch_landmark
     const waistMidPt = landmarks.front_waist_midline_landmark  // belly button (confirmed front)
     if (!pathPts?.length && !neckPt) return
 
@@ -1349,8 +1396,8 @@ export default function ViewerPanel({
       group.add(s)
     }
 
-    addDot(neckPt,     0xffffff, 0.015)  // neck top — white
-    addDot(crotchPt,   0xff5500, 0.015)  // crotch — orange-red
+    addDot(neckPt, 0xffffff, 0.015)  // neck top — white
+    addDot(crotchPt, 0xff5500, 0.015)  // crotch — orange-red
     addDot(waistMidPt, 0xffaa00)         // belly button mid-anchor — amber
 
     scene.add(group)
@@ -1396,7 +1443,7 @@ export default function ViewerPanel({
     // Close the loop
     const closed = new Float32Array(positions.length + 3)
     closed.set(positions)
-    closed[positions.length]     = positions[0]
+    closed[positions.length] = positions[0]
     closed[positions.length + 1] = positions[1]
     closed[positions.length + 2] = positions[2]
     const ringGeo = new THREE.BufferGeometry()
@@ -1551,4 +1598,6 @@ export default function ViewerPanel({
       )}
     </div>
   )
-}
+})
+
+export default ViewerPanel

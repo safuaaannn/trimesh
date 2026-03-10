@@ -1,4 +1,4 @@
- import { useState, useCallback, useEffect, useRef, createContext } from 'react'
+import { useState, useCallback, useEffect, useRef, createContext } from 'react'
 import { Flex, Box, Button } from '@radix-ui/themes'
 import UploadPanel from './components/UploadPanel'
 import ViewerPanel from './components/ViewerPanel'
@@ -54,6 +54,7 @@ function App() {
   const [isMeasurementOverlayOpen, setIsMeasurementOverlayOpen] = useState(false)
   const [showIntro, setShowIntro] = useState(true)
   const pollAttemptRef = useRef(0)
+  const viewerRef = useRef(null)
 
   const persistSessionState = useCallback((payload) => {
     if (typeof window === 'undefined') return
@@ -186,13 +187,25 @@ function App() {
     setMeasurementError(null)
 
     try {
+      // Check if user has applied slider rotations
+      const rotations = jointRotationsByPerson[personIndex]
+      const hasCustomPose = rotations && Object.values(rotations).some(
+        r => r.x !== 0 || r.y !== 0 || r.z !== 0
+      )
+
+      let bakedVertices = null
+      if (hasCustomPose && viewerRef.current?.bakeSkinnedVertices) {
+        bakedVertices = viewerRef.current.bakeSkinnedVertices(personIndex)
+      }
+
       const res = await fetch('/api/measurements', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           session_id: sessionMeta.sessionId,
           person_index: personIndex,
-          target_height_cm: targetHeightCm
+          target_height_cm: targetHeightCm,
+          baked_vertices: bakedVertices
         })
       })
 
@@ -222,7 +235,7 @@ function App() {
     } finally {
       setMeasurementLoading(false)
     }
-  }, [sessionMeta?.sessionId])
+  }, [sessionMeta?.sessionId, jointRotationsByPerson])
 
   const handleMeasurementHeightChange = useCallback((personIndex, value) => {
     setTargetHeightInputs(prev => ({
@@ -475,38 +488,39 @@ function App() {
       <div className="app-shell">
         <Flex className="app-container" gap="0">
           <Box className="left-panel">
-          <UploadPanel
-            onUpload={handleImageUpload}
-            loading={loading}
-            error={error}
-            language={language}
-            onToggleLanguage={toggleLanguage}
-            imagePreviewUrl={uploadedImageUrl}
-            onClearSession={handleClearSession}
-            onReprocess={handleReprocess}
-            hasCachedResult={Boolean(sessionMeta?.status === 'completed' && rigData)}
-            restoringSession={restoringSession}
-            sessionStatus={sessionMeta?.status}
-          />
-
-          {rigData && (
-            <ControlPanel
-              rigData={rigData}
-              selectedPerson={selectedPerson}
-              onPersonSelect={setSelectedPerson}
-              jointRotations={currentJointRotations}
-              onJointRotationChange={handleJointRotationChange}
-              onResetPose={handleResetPose}
-              showJoints={showJoints}
-              onToggleJoints={setShowJoints}
+            <UploadPanel
+              onUpload={handleImageUpload}
+              loading={loading}
+              error={error}
               language={language}
+              onToggleLanguage={toggleLanguage}
+              imagePreviewUrl={uploadedImageUrl}
+              onClearSession={handleClearSession}
+              onReprocess={handleReprocess}
+              hasCachedResult={Boolean(sessionMeta?.status === 'completed' && rigData)}
+              restoringSession={restoringSession}
+              sessionStatus={sessionMeta?.status}
             />
-          )}
+
+            {rigData && (
+              <ControlPanel
+                rigData={rigData}
+                selectedPerson={selectedPerson}
+                onPersonSelect={setSelectedPerson}
+                jointRotations={currentJointRotations}
+                onJointRotationChange={handleJointRotationChange}
+                onResetPose={handleResetPose}
+                showJoints={showJoints}
+                onToggleJoints={setShowJoints}
+                language={language}
+              />
+            )}
           </Box>
 
           <Box className="right-panel">
             <div className="viewer-stage">
               <ViewerPanel
+                ref={viewerRef}
                 allRigData={rigData?.rig_data}
                 selectedPerson={selectedPerson}
                 onPersonSelect={setSelectedPerson}
