@@ -1,4 +1,4 @@
- import { useState, useCallback, useEffect, useRef, createContext } from 'react'
+import { useState, useCallback, useEffect, useRef, createContext } from 'react'
 import { Flex, Box, Button } from '@radix-ui/themes'
 import UploadPanel from './components/UploadPanel'
 import ViewerPanel from './components/ViewerPanel'
@@ -48,7 +48,9 @@ function App() {
   const [cachedImageInfo, setCachedImageInfo] = useState(null)
   const [restoringSession, setRestoringSession] = useState(true)
   const [measurementsByPerson, setMeasurementsByPerson] = useState({})
+  const [tposeMeasurementsByPerson, setTposeMeasurementsByPerson] = useState({})
   const [targetHeightInputs, setTargetHeightInputs] = useState({})
+  const [activeMeasurementTab, setActiveMeasurementTab] = useState('posed') // 'posed' | 'tpose'
   const [measurementLoading, setMeasurementLoading] = useState(false)
   const [measurementError, setMeasurementError] = useState(null)
   const [isMeasurementOverlayOpen, setIsMeasurementOverlayOpen] = useState(false)
@@ -158,7 +160,9 @@ function App() {
     setSelectedPerson(0)
     setJointRotationsByPerson({})
     setMeasurementsByPerson({})
+    setTposeMeasurementsByPerson({})
     setTargetHeightInputs({})
+    setActiveMeasurementTab('posed')
     setUploadedImageUrl(null)
     setCachedImageInfo(null)
     setError(null)
@@ -224,6 +228,43 @@ function App() {
     }
   }, [sessionMeta?.sessionId])
 
+  const fetchTposeMeasurements = useCallback(async (personIndex, targetHeightCm) => {
+    if (!sessionMeta?.sessionId) return
+    setMeasurementLoading(true)
+    setMeasurementError(null)
+
+    try {
+      const res = await fetch('/api/tpose-measurements', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          session_id: sessionMeta.sessionId,
+          person_index: personIndex,
+          target_height_cm: targetHeightCm
+        })
+      })
+
+      if (!res.ok) {
+        const data = await res.json().catch(() => ({}))
+        throw new Error(data.error || 'Failed to compute T-Pose measurements')
+      }
+
+      const data = await res.json()
+      setTposeMeasurementsByPerson(prev => ({
+        ...prev,
+        [personIndex]: {
+          ...data,
+          fetchedAt: Date.now()
+        }
+      }))
+    } catch (err) {
+      console.error('T-Pose Measurement error:', err)
+      setMeasurementError(err.message)
+    } finally {
+      setMeasurementLoading(false)
+    }
+  }, [sessionMeta?.sessionId])
+
   const handleMeasurementHeightChange = useCallback((personIndex, value) => {
     setTargetHeightInputs(prev => ({
       ...prev,
@@ -245,7 +286,8 @@ function App() {
       return
     }
     fetchMeasurements(personIndex, parsed)
-  }, [fetchMeasurements, language])
+    fetchTposeMeasurements(personIndex, parsed)
+  }, [fetchMeasurements, fetchTposeMeasurements, language])
 
   useEffect(() => {
     if (typeof window === 'undefined') return
@@ -475,33 +517,33 @@ function App() {
       <div className="app-shell">
         <Flex className="app-container" gap="0">
           <Box className="left-panel">
-          <UploadPanel
-            onUpload={handleImageUpload}
-            loading={loading}
-            error={error}
-            language={language}
-            onToggleLanguage={toggleLanguage}
-            imagePreviewUrl={uploadedImageUrl}
-            onClearSession={handleClearSession}
-            onReprocess={handleReprocess}
-            hasCachedResult={Boolean(sessionMeta?.status === 'completed' && rigData)}
-            restoringSession={restoringSession}
-            sessionStatus={sessionMeta?.status}
-          />
-
-          {rigData && (
-            <ControlPanel
-              rigData={rigData}
-              selectedPerson={selectedPerson}
-              onPersonSelect={setSelectedPerson}
-              jointRotations={currentJointRotations}
-              onJointRotationChange={handleJointRotationChange}
-              onResetPose={handleResetPose}
-              showJoints={showJoints}
-              onToggleJoints={setShowJoints}
+            <UploadPanel
+              onUpload={handleImageUpload}
+              loading={loading}
+              error={error}
               language={language}
+              onToggleLanguage={toggleLanguage}
+              imagePreviewUrl={uploadedImageUrl}
+              onClearSession={handleClearSession}
+              onReprocess={handleReprocess}
+              hasCachedResult={Boolean(sessionMeta?.status === 'completed' && rigData)}
+              restoringSession={restoringSession}
+              sessionStatus={sessionMeta?.status}
             />
-          )}
+
+            {rigData && (
+              <ControlPanel
+                rigData={rigData}
+                selectedPerson={selectedPerson}
+                onPersonSelect={setSelectedPerson}
+                jointRotations={currentJointRotations}
+                onJointRotationChange={handleJointRotationChange}
+                onResetPose={handleResetPose}
+                showJoints={showJoints}
+                onToggleJoints={setShowJoints}
+                language={language}
+              />
+            )}
           </Box>
 
           <Box className="right-panel">
@@ -515,6 +557,8 @@ function App() {
                 showJoints={showJoints}
                 language={language}
                 measurementData={currentMeasurement}
+                activeMeasurementTab={activeMeasurementTab}
+                tposeMeasurementData={tposeMeasurementsByPerson[selectedPerson] || null}
               />
 
               {rigData && (
@@ -534,13 +578,15 @@ function App() {
                 selectedPerson={selectedPerson}
                 visible={isMeasurementOverlayOpen}
                 onClose={() => handleToggleMeasurementOverlay(false)}
-                measurementData={currentMeasurement}
+                measurementData={activeMeasurementTab === 'tpose' ? (tposeMeasurementsByPerson[selectedPerson] || null) : currentMeasurement}
                 measurementError={measurementError}
                 measurementLoading={measurementLoading}
                 targetHeightValue={targetHeightValue}
                 onTargetHeightChange={(value) => handleMeasurementHeightChange(selectedPerson, value)}
                 onApply={(value) => handleMeasurementApply(selectedPerson, value)}
                 onExport={handleMeasurementExport}
+                activeTab={activeMeasurementTab}
+                onTabChange={setActiveMeasurementTab}
               />
             </div>
           </Box>

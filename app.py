@@ -9,6 +9,7 @@ from threading import Thread
 
 import cv2
 import numpy as np
+import torch
 from flask import Flask, jsonify, request, send_from_directory
 from flask_cors import CORS
 from werkzeug.utils import secure_filename
@@ -279,6 +280,9 @@ def export_rigged_models(predictions, faces, rig_template, export_dir="meshes"):
                 "focal_length": float(person_output["focal_length"]),
                 "bbox": person_output["bbox"].tolist(),
                 "root_translation": rig_info["root_offset"].tolist(),
+                "shape_params": person_output["shape_params"].tolist(),
+                "expr_params": person_output["expr_params"].tolist(),
+                "scale_params": person_output["scale_params"].tolist(),
             },
         }
 
@@ -288,6 +292,46 @@ def export_rigged_models(predictions, faces, rig_template, export_dir="meshes"):
         rig_files.append(rig_path)
 
     return rig_files
+
+
+def generate_tpose_mesh(shape_params, expr_params, scale_params):
+    """Generates a clean T-Pose mesh natively from MHR, along with aligned joints and keypoints."""
+    # Convert saved lists back to tensors
+    device = "cuda" if torch.cuda.is_available() else "cpu"
+    identity_coeffs = torch.tensor(shape_params, dtype=torch.float32).unsqueeze(0).to(device)
+    face_expr = torch.tensor(expr_params, dtype=torch.float32).unsqueeze(0).to(device)
+    scale_coeffs = torch.tensor(scale_params, dtype=torch.float32).unsqueeze(0).to(device)
+    
+    # Zero out the pose parameters (θ) for T-Pose
+    global_trans = torch.zeros((1, 3), dtype=torch.float32, device=device)
+    global_rot = torch.zeros((1, 3), dtype=torch.float32, device=device)
+    body_pose = torch.zeros((1, 130), dtype=torch.float32, device=device)
+
+    # Use the global MHR head inside SAM-3D
+    mhr_head = estimator.model.head_pose
+    
+    with torch.no_grad():
+        output = mhr_head.mhr_forward(
+            global_trans=global_trans,
+            global_rot=global_rot,
+            body_pose_params=body_pose,
+            hand_pose_params=None,
+            scale_params=scale_coeffs,
+            shape_params=identity_coeffs,
+            expr_params=face_expr,
+            return_keypoints=True,
+            return_joint_coords=True
+        )
+
+    verts, j3d, jcoords = output
+    j3d = j3d[:, :70]  # Take only the 70 keypoints
+
+    # Outputs are already in meters
+    vertices = verts[0].cpu().numpy().astype(np.float32)
+    joints = jcoords[0].cpu().numpy().astype(np.float32)
+    keypoints = j3d[0].cpu().numpy().astype(np.float32)
+    
+    return vertices, joints, keypoints
 
 
 # ---------------------------------------------------------------------------
@@ -581,6 +625,106 @@ def calculate_measurements():
     except Exception as exc:
         print(f"[Measurements] Failed for session {session_id}: {exc}")
         return jsonify({"error": "Failed to compute measurements"}), 500
+
+
+@app.route('/api/tpose-measurements', methods=['POST'])
+def calculate_tpose_measurements():
+    try:
+        payload = request.get_json(force=True)
+    except Exception:
+        return jsonify({"error": "Invalid JSON payload"}), 400
+
+    session_id = payload.get("session_id")
+    if not session_id:
+        return jsonify({"error": "Missing session_id"}), 400
+
+    session = get_session(session_id)
+    if not session:
+        return jsonify({"error": "Session not found"}), 404
+
+    if session.get("status") != "completed":
+        return jsonify({"error": "Session is not ready"}), 409
+
+    rig_data = session.get("rig_data") or []
+
+    try:
+        person_index = int(payload.get("person_index", 0))
+    except (TypeError, ValueError):
+        return jsonify({"error": "Invalid person_index"}), 400
+
+    if person_index < 0 or person_index >= len(rig_data):
+        return jsonify({"error": "person_index out of range"}), 400
+
+    target_height_cm = payload.get("target_height_cm")
+    if target_height_cm is not None:
+        try:
+            target_height_cm = float(target_height_cm)
+        except (TypeError, ValueError):
+            return jsonify({"error": "target_height_cm must be numeric"}), 400
+
+    person_rig = rig_data[person_index]
+    metadata = person_rig.get("metadata", {})
+    shape_params = metadata.get("shape_params")
+    expr_params = metadata.get("expr_params")
+    scale_params = metadata.get("scale_params")
+
+    if not shape_params or not expr_params or not scale_params:
+         return jsonify({"error": "Missing MHR parameters in session. Please process a new image."}), 400
+
+    try:
+        # Generate the T-Pose geometries on-demand
+        tpose_vertices, tpose_joints, tpose_keypoints = generate_tpose_mesh(shape_params, expr_params, scale_params)
+
+        # Standardise coordinates to exactly match the posed rig
+        parents = np.array(person_rig["skeleton"]["parents"])
+        root_idx = int(np.where(parents == -1)[0][0])
+        
+        root_offset = tpose_joints[root_idx].copy()
+        
+        tpose_vertices = tpose_vertices - root_offset
+        tpose_joints = tpose_joints - root_offset
+        tpose_keypoints = tpose_keypoints - root_offset
+
+        formatted_keypoints = [
+            {"name": name, "position": tpose_keypoints[kp_idx].tolist()}
+            for name, kp_idx in MHR70_NAME_TO_IDX.items()
+        ]
+
+        # Build a synthetic rig replacing the posed mesh and skeleton with the clean T-Pose ones.
+        # We also MUST zero out the root_translation because the T-pose is generated perfectly
+        # at the origin. If we pass the posed root_translation, the frontend will offset the
+        # T-Pose geometry and measurement helpers incorrectly.
+        tpose_metadata = dict(metadata)
+        tpose_metadata["root_translation"] = [0.0, 0.0, 0.0]
+
+        measurement_rig = {
+            "mesh": {
+                **person_rig["mesh"],
+                "vertices": tpose_vertices.tolist(),
+            },
+            "skeleton": {
+                **person_rig["skeleton"],
+                "joint_positions": tpose_joints.tolist(),
+            },
+            "animation_targets": person_rig.get("animation_targets", {}),
+            "keypoints": formatted_keypoints,
+            "metadata": tpose_metadata,
+        }
+
+        result = compute_measurements(measurement_rig, target_height_cm=target_height_cm)
+        result.update({
+            "session_id": session_id,
+            "person_index": person_index,
+            "measurement_rig": measurement_rig,
+        })
+        return jsonify(result)
+    except MeasurementError as err:
+        return jsonify({"error": str(err)}), 422
+    except Exception as exc:
+        print(f"[T-Pose Measurements] Failed for session {session_id}: {exc}")
+        import traceback
+        traceback.print_exc()
+        return jsonify({"error": "Failed to compute T-Pose measurements"}), 500
 
 
 # Serve React frontend

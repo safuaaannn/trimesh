@@ -13,7 +13,9 @@ export default function ViewerPanel({
   jointRotationsByPerson,
   showJoints,
   language,
-  measurementData
+  measurementData,
+  activeMeasurementTab = 'posed',
+  tposeMeasurementData = null
 }) {
   const mountRef = useRef(null)
   const sceneRef = useRef(null)
@@ -41,6 +43,9 @@ export default function ViewerPanel({
   const [hoveredVertex, setHoveredVertex] = useState(null) // { index, x, y }
 
   const t = translations[language]
+
+  // Decide which measurement data to show based on the active tab
+  const activeMeasurementData = activeMeasurementTab === 'tpose' && tposeMeasurementData ? tposeMeasurementData : measurementData;
 
   // Initialize Three.js scene once
   useEffect(() => {
@@ -371,16 +376,26 @@ export default function ViewerPanel({
 
       // Load each person
       allRigData.forEach((rigData, personIndex) => {
-        const { mesh, skeleton: skel, metadata } = rigData
+        let meshToUse = rigData.mesh
+        let skelToUse = rigData.skeleton
+
+        // Hijack with T-Pose data if available and active
+        if (activeMeasurementTab === 'tpose' && tposeMeasurementData?.measurement_rig) {
+          console.log(`[Viewer] Using T-Pose geometry for person ${personIndex}`)
+          meshToUse = tposeMeasurementData.measurement_rig.mesh
+          skelToUse = tposeMeasurementData.measurement_rig.skeleton
+        }
+
+        const { metadata } = rigData
 
         console.log(`[Viewer] Loading person ${personIndex}, metadata:`, metadata)
 
         // Create geometry
         const geometry = new THREE.BufferGeometry()
-        const vertices = new Float32Array(mesh.vertices.flat())
-        const indices = new Uint32Array(mesh.faces.flat())
-        const skinIndices = new Uint16Array(mesh.skinIndices.flat())
-        const skinWeights = new Float32Array(mesh.skinWeights.flat())
+        const vertices = new Float32Array(meshToUse.vertices.flat())
+        const indices = new Uint32Array(meshToUse.faces.flat())
+        const skinIndices = new Uint16Array(meshToUse.skinIndices.flat())
+        const skinWeights = new Float32Array(meshToUse.skinWeights.flat())
 
         geometry.setAttribute('position', new THREE.BufferAttribute(vertices, 3))
         geometry.setIndex(new THREE.BufferAttribute(indices, 1))
@@ -390,15 +405,15 @@ export default function ViewerPanel({
 
         // Create bones
         const bones = []
-        skel.joint_names.forEach((name, idx) => {
+        skelToUse.joint_names.forEach((name, idx) => {
           const bone = new THREE.Bone()
           bone.name = name
           bone.rotation.order = 'XYZ' // Set consistent rotation order
-          const parentIdx = skel.parents[idx]
-          const pos = skel.joint_positions[idx]
+          const parentIdx = skelToUse.parents[idx]
+          const pos = skelToUse.joint_positions[idx]
 
           if (parentIdx >= 0) {
-            const parentPos = skel.joint_positions[parentIdx]
+            const parentPos = skelToUse.joint_positions[parentIdx]
             bone.position.set(
               pos[0] - parentPos[0],
               pos[1] - parentPos[1],
@@ -413,7 +428,7 @@ export default function ViewerPanel({
 
         // Build hierarchy
         bones.forEach((bone, idx) => {
-          const parentIdx = skel.parents[idx]
+          const parentIdx = skelToUse.parents[idx]
           if (parentIdx >= 0) {
             bones[parentIdx].add(bone)
           }
@@ -424,18 +439,18 @@ export default function ViewerPanel({
           if (neckIdx < 0) return -1
           const headNameCandidates = ['head', 'joint_113', 'joint_112', 'joint_111', 'nose']
           for (const candidate of headNameCandidates) {
-            const idx = skel.joint_names.indexOf(candidate)
+            const idx = skelToUse.joint_names.indexOf(candidate)
             if (idx >= 0) return idx
           }
 
           const faceKeywords = ['nose', 'eye', 'ear', 'joint_11', 'joint_12', 'jaw']
-          const neckParent = skel.parents[neckIdx]
+          const neckParent = skelToUse.parents[neckIdx]
 
           // Head may share the same parent as the neck (sibling)
           if (neckParent >= 0) {
-            for (let i = 0; i < skel.parents.length; i += 1) {
-              if (skel.parents[i] === neckParent && i !== neckIdx) {
-                const name = skel.joint_names[i]
+            for (let i = 0; i < skelToUse.parents.length; i += 1) {
+              if (skelToUse.parents[i] === neckParent && i !== neckIdx) {
+                const name = skelToUse.joint_names[i]
                 if (faceKeywords.some(keyword => name.includes(keyword))) {
                   return i
                 }
@@ -444,9 +459,9 @@ export default function ViewerPanel({
           }
 
           // Head may be a child of the neck
-          for (let i = 0; i < skel.parents.length; i += 1) {
-            if (skel.parents[i] === neckIdx) {
-              const name = skel.joint_names[i]
+          for (let i = 0; i < skelToUse.parents.length; i += 1) {
+            if (skelToUse.parents[i] === neckIdx) {
+              const name = skelToUse.joint_names[i]
               if (faceKeywords.some(keyword => name.includes(keyword))) {
                 return i
               }
@@ -459,21 +474,21 @@ export default function ViewerPanel({
         // Debug: Log neck and head bone hierarchy for this person
         // Note: personIndex is 0-based, but UI shows 1-based (Person 1, Person 2, etc.)
         const displayPersonNumber = personIndex + 1
-        const neckBoneIdx = skel.joint_names.indexOf('neck')
-        let headBoneIdx = skel.joint_names.indexOf('head')
+        const neckBoneIdx = skelToUse.joint_names.indexOf('neck')
+        let headBoneIdx = skelToUse.joint_names.indexOf('head')
         if (headBoneIdx < 0) {
           headBoneIdx = resolveHeadBoneIndex(neckBoneIdx)
         }
 
         console.log(`[Viewer] Person ${displayPersonNumber} (index ${personIndex}) - Looking for 'neck', found at index: ${neckBoneIdx}`)
         console.log(`[Viewer] Person ${displayPersonNumber} (index ${personIndex}) - Looking for 'head', found at index: ${headBoneIdx}`)
-        console.log(`[Viewer] Person ${displayPersonNumber} (index ${personIndex}) - Total joints: ${skel.joint_names.length}`)
-        console.log(`[Viewer] Person ${displayPersonNumber} (index ${personIndex}) - Sample joint names:`, skel.joint_names.slice(0, 10))
+        console.log(`[Viewer] Person ${displayPersonNumber} (index ${personIndex}) - Total joints: ${skelToUse.joint_names.length}`)
+        console.log(`[Viewer] Person ${displayPersonNumber} (index ${personIndex}) - Sample joint names:`, skelToUse.joint_names.slice(0, 10))
 
         if (neckBoneIdx >= 0) {
           const neckBone = bones[neckBoneIdx]
           console.log(`[Viewer] Person ${displayPersonNumber} (index ${personIndex}) - ✓ Neck bone found at index ${neckBoneIdx}, name: ${neckBone.name}`)
-          console.log(`[Viewer] Person ${displayPersonNumber} (index ${personIndex}) - Neck parent: ${skel.parents[neckBoneIdx]} (${skel.parents[neckBoneIdx] >= 0 ? skel.joint_names[skel.parents[neckBoneIdx]] : 'root'})`)
+          console.log(`[Viewer] Person ${displayPersonNumber} (index ${personIndex}) - Neck parent: ${skelToUse.parents[neckBoneIdx]} (${skelToUse.parents[neckBoneIdx] >= 0 ? skelToUse.joint_names[skelToUse.parents[neckBoneIdx]] : 'root'})`)
           console.log(`[Viewer] Person ${displayPersonNumber} (index ${personIndex}) - Neck children count: ${neckBone.children.length}`)
           console.log(`[Viewer] Person ${displayPersonNumber} (index ${personIndex}) - Neck children:`, neckBone.children.map(c => c.name))
         } else {
@@ -483,7 +498,7 @@ export default function ViewerPanel({
         if (headBoneIdx >= 0) {
           const headBone = bones[headBoneIdx]
           console.log(`[Viewer] Person ${displayPersonNumber} (index ${personIndex}) - ✓ Head bone resolved at index ${headBoneIdx}, name: ${headBone.name}`)
-          console.log(`[Viewer] Person ${displayPersonNumber} (index ${personIndex}) - Head parent: ${skel.parents[headBoneIdx]} (${skel.parents[headBoneIdx] >= 0 ? skel.joint_names[skel.parents[headBoneIdx]] : 'root'})`)
+          console.log(`[Viewer] Person ${displayPersonNumber} (index ${personIndex}) - Head parent: ${skelToUse.parents[headBoneIdx]} (${skelToUse.parents[headBoneIdx] >= 0 ? skelToUse.joint_names[skelToUse.parents[headBoneIdx]] : 'root'})`)
         } else {
           console.log(`[Viewer] Person ${displayPersonNumber} (index ${personIndex}) - Unable to resolve a head bone (only neck will be controllable)`)
         }
@@ -501,7 +516,7 @@ export default function ViewerPanel({
 
         // Create skinned mesh
         const skinnedMesh = new THREE.SkinnedMesh(geometry, material)
-        const rootBones = bones.filter((_, idx) => skel.parents[idx] === -1)
+        const rootBones = bones.filter((_, idx) => skelToUse.parents[idx] === -1)
         rootBones.forEach(root => skinnedMesh.add(root))
 
         const skeleton = new THREE.Skeleton(bones)
@@ -512,19 +527,19 @@ export default function ViewerPanel({
         // Keep relative positions but center them and place all on ground
         if (metadata && metadata.root_translation) {
           const rootTrans = metadata.root_translation
-          
+
           // Calculate relative position from center (for X and Z)
           // Keep relative positions but center them around origin
           const relativeX = rootTrans[0] - centerX
           const relativeZ = rootTrans[2] - centerZ  // Use original Z before flipping
-          
+
           // Set position: relative X/Z, Y will be adjusted based on mesh bounds
           skinnedMesh.position.set(
             relativeX,         // X: relative to center (keep relative positions)
             0,                 // Y: temporary, will be adjusted below
             -relativeZ        // Z: flip Z and use relative position
           )
-          
+
           // Calculate mesh bounding box to find the lowest point (feet)
           // This is in local space (mesh origin is at neck)
           geometry.computeBoundingBox()
@@ -542,11 +557,11 @@ export default function ViewerPanel({
               note: 'Centered and placed on ground, keeping relative positions'
             })
           } else {
-          console.log(`[Viewer] Person ${personIndex} positioned at:`, {
-            original: rootTrans,
+            console.log(`[Viewer] Person ${personIndex} positioned at:`, {
+              original: rootTrans,
               relative: [relativeX, relativeZ],
               note: 'Could not compute bounding box, using relative position'
-          })
+            })
           }
         }
 
@@ -556,7 +571,7 @@ export default function ViewerPanel({
         const helpersGroup = new THREE.Group()
 
         // Joint spheres
-        skel.joint_positions.forEach((pos) => {
+        skelToUse.joint_positions.forEach((pos) => {
           const sphere = new THREE.Mesh(
             new THREE.SphereGeometry(0.02, 12, 12),
             new THREE.MeshBasicMaterial({
@@ -569,7 +584,7 @@ export default function ViewerPanel({
 
         // Bone lines
         const linePairs = []
-        skel.parents.forEach((parentIdx, childIdx) => {
+        skelToUse.parents.forEach((parentIdx, childIdx) => {
           if (parentIdx >= 0) {
             linePairs.push([parentIdx, childIdx])
           }
@@ -578,8 +593,8 @@ export default function ViewerPanel({
         if (linePairs.length > 0) {
           const linePositions = new Float32Array(linePairs.length * 6)
           linePairs.forEach(([pIdx, cIdx], i) => {
-            const pPos = skel.joint_positions[pIdx]
-            const cPos = skel.joint_positions[cIdx]
+            const pPos = skelToUse.joint_positions[pIdx]
+            const cPos = skelToUse.joint_positions[cIdx]
             const offset = i * 6
             linePositions[offset + 0] = pPos[0]
             linePositions[offset + 1] = pPos[1]
@@ -607,6 +622,8 @@ export default function ViewerPanel({
           const relativeZ = rootTrans[2] - centerZ
           // Use same Y as mesh (after adjustment)
           helpersGroup.position.set(relativeX, skinnedMesh.position.y, -relativeZ)
+
+          console.log(`[Viewer] Helpers applied translation Y: ${skinnedMesh.position.y}`)
         }
 
         scene.add(helpersGroup)
@@ -662,7 +679,7 @@ export default function ViewerPanel({
       setError(`Failed to load models: ${err.message}`)
       setIsLoading(false)
     }
-  }, [allRigData])
+  }, [allRigData, selectedPerson, activeMeasurementTab, tposeMeasurementData])
 
   // Apply saved rotations to a specific person
   const applyPersonRotations = useCallback((personIndex, rotations) => {
@@ -798,7 +815,7 @@ export default function ViewerPanel({
       const bone = selectedPersonData.bones[boneIdx]
       console.log(`[Viewer] Applying rotation to ${jointName} (bone ${boneIdx}):`, rotation)
       console.log(`[Viewer]   - Bone name: ${bone.name}, Parent: ${bone.parent?.name || 'none'}`)
-      
+
       // Apply rotation in local space
       bone.rotation.set(
         rotation.x || 0,
@@ -867,7 +884,7 @@ export default function ViewerPanel({
       chestVisualsRef.current = null
     }
 
-    const landmarks = measurementData?.landmarks
+    const landmarks = activeMeasurementData?.landmarks
     if (!landmarks) return
 
     const ringPoints = landmarks.chest_ring_points
@@ -918,7 +935,7 @@ export default function ViewerPanel({
 
     scene.add(group)
     chestVisualsRef.current = group
-  }, [measurementData, selectedPerson])
+  }, [activeMeasurementData, selectedPerson])
 
   // Waist ring + landmark visualization (SMPLX-style measurement)
   useEffect(() => {
@@ -935,7 +952,7 @@ export default function ViewerPanel({
       waistVisualsRef.current = null
     }
 
-    const landmarks = measurementData?.landmarks
+    const landmarks = activeMeasurementData?.landmarks
     if (!landmarks) return
 
     const ringPoints = landmarks.waist_ring_points
@@ -1033,7 +1050,7 @@ export default function ViewerPanel({
 
     scene.add(group)
     waistVisualsRef.current = group
-  }, [measurementData, selectedPerson])
+  }, [activeMeasurementData, selectedPerson])
 
   // Hip ring + pubic bone landmark (SMPLX-style measurement)
   useEffect(() => {
@@ -1049,7 +1066,7 @@ export default function ViewerPanel({
       hipVisualsRef.current = null
     }
 
-    const landmarks = measurementData?.landmarks
+    const landmarks = activeMeasurementData?.landmarks
     if (!landmarks) return
 
     const ringPoints = landmarks.hip_ring_points
@@ -1087,7 +1104,7 @@ export default function ViewerPanel({
 
     scene.add(group)
     hipVisualsRef.current = group
-  }, [measurementData, selectedPerson])
+  }, [activeMeasurementData, selectedPerson])
 
   // Left thigh ring (SMPLX-style — UV-projected, leg-axis plane)
   useEffect(() => {
@@ -1103,7 +1120,7 @@ export default function ViewerPanel({
       thighVisualsRef.current = null
     }
 
-    const landmarks = measurementData?.landmarks
+    const landmarks = activeMeasurementData?.landmarks
     if (!landmarks) return
 
     const ringPoints = landmarks.left_thigh_ring_points
@@ -1141,7 +1158,7 @@ export default function ViewerPanel({
 
     scene.add(group)
     thighVisualsRef.current = group
-  }, [measurementData, selectedPerson])
+  }, [activeMeasurementData, selectedPerson])
 
   // Inseam line + crotch sphere + heel sphere
   useEffect(() => {
@@ -1157,11 +1174,11 @@ export default function ViewerPanel({
       inseamVisualsRef.current = null
     }
 
-    const landmarks = measurementData?.landmarks
+    const landmarks = activeMeasurementData?.landmarks
     if (!landmarks) return
 
     const crotchPt = landmarks.inseam_crotch_landmark
-    const heelPt   = landmarks.inseam_heel_landmark
+    const heelPt = landmarks.inseam_heel_landmark
     if (!crotchPt && !heelPt) return
 
     const personData = personsRef.current[selectedPerson]
@@ -1200,7 +1217,7 @@ export default function ViewerPanel({
 
     scene.add(group)
     inseamVisualsRef.current = group
-  }, [measurementData, selectedPerson])
+  }, [activeMeasurementData, selectedPerson])
 
   // Arm length line + shoulder / elbow / wrist spheres (green)
   useEffect(() => {
@@ -1216,7 +1233,7 @@ export default function ViewerPanel({
       armVisualsRef.current = null
     }
 
-    const landmarks = measurementData?.landmarks
+    const landmarks = activeMeasurementData?.landmarks
     if (!landmarks) return
 
     const waypoints = landmarks.arm_waypoints
@@ -1249,7 +1266,7 @@ export default function ViewerPanel({
 
     scene.add(group)
     armVisualsRef.current = group
-  }, [measurementData, selectedPerson])
+  }, [activeMeasurementData, selectedPerson])
 
   // Shoulder breadth — geodesic path over the back surface (right acromion → left acromion)
   // Cyan-green line hugging the posterior shoulder/back; cyan endpoint dots.
@@ -1266,7 +1283,7 @@ export default function ViewerPanel({
       shoulderBreadthVisualsRef.current = null
     }
 
-    const landmarks = measurementData?.landmarks
+    const landmarks = activeMeasurementData?.landmarks
     if (!landmarks) return
 
     const pathPts = landmarks.shoulder_breadth_path
@@ -1294,12 +1311,12 @@ export default function ViewerPanel({
       m.position.set(pt[0], pt[1], pt[2])
       group.add(m)
     }
-    addDot(landmarks.shoulder_left_landmark,  0x44ff44)  // left acromion — lime
+    addDot(landmarks.shoulder_left_landmark, 0x44ff44)  // left acromion — lime
     addDot(landmarks.shoulder_right_landmark, 0xffff00)  // right acromion — yellow
 
     scene.add(group)
     shoulderBreadthVisualsRef.current = group
-  }, [measurementData, selectedPerson])
+  }, [activeMeasurementData, selectedPerson])
 
   // Front body length — geodesic surface path (neck top → crotch)
   // Draws the actual surface path the tape measure would follow on the front body.
@@ -1316,12 +1333,12 @@ export default function ViewerPanel({
       frontBodyVisualsRef.current = null
     }
 
-    const landmarks = measurementData?.landmarks
+    const landmarks = activeMeasurementData?.landmarks
     if (!landmarks) return
 
-    const pathPts    = landmarks.shoulder_to_crotch_path
-    const neckPt     = landmarks.neck_top_landmark
-    const crotchPt   = landmarks.inseam_crotch_landmark
+    const pathPts = landmarks.shoulder_to_crotch_path
+    const neckPt = landmarks.neck_top_landmark
+    const crotchPt = landmarks.inseam_crotch_landmark
     const waistMidPt = landmarks.front_waist_midline_landmark  // belly button (confirmed front)
     if (!pathPts?.length && !neckPt) return
 
@@ -1349,13 +1366,13 @@ export default function ViewerPanel({
       group.add(s)
     }
 
-    addDot(neckPt,     0xffffff, 0.015)  // neck top — white
-    addDot(crotchPt,   0xff5500, 0.015)  // crotch — orange-red
+    addDot(neckPt, 0xffffff, 0.015)  // neck top — white
+    addDot(crotchPt, 0xff5500, 0.015)  // crotch — orange-red
     addDot(waistMidPt, 0xffaa00)         // belly button mid-anchor — amber
 
     scene.add(group)
     frontBodyVisualsRef.current = group
-  }, [measurementData, selectedPerson])
+  }, [activeMeasurementData, selectedPerson])
 
   // Shoulder ring — horizontal cross-section through vertex 7953 (bright purple)
   useEffect(() => {
@@ -1371,8 +1388,8 @@ export default function ViewerPanel({
       shoulderRingVisualsRef.current = null
     }
 
-    const ringPts = measurementData?.landmarks?.shoulder_ring_points
-    const landmarkPt = measurementData?.landmarks?.shoulder_ring_landmark
+    const ringPts = activeMeasurementData?.landmarks?.shoulder_ring_points
+    const landmarkPt = activeMeasurementData?.landmarks?.shoulder_ring_landmark
     if (!ringPts?.length) return
 
     const personData = personsRef.current[selectedPerson]
@@ -1396,7 +1413,7 @@ export default function ViewerPanel({
     // Close the loop
     const closed = new Float32Array(positions.length + 3)
     closed.set(positions)
-    closed[positions.length]     = positions[0]
+    closed[positions.length] = positions[0]
     closed[positions.length + 1] = positions[1]
     closed[positions.length + 2] = positions[2]
     const ringGeo = new THREE.BufferGeometry()
@@ -1408,7 +1425,7 @@ export default function ViewerPanel({
 
     scene.add(group)
     shoulderRingVisualsRef.current = group
-  }, [measurementData, selectedPerson])
+  }, [activeMeasurementData, selectedPerson])
 
   // Waist slab vertex debug visualisation — shows every mesh vertex that lies
   // inside the horizontal cutting slab used for the waist circumference.
@@ -1428,9 +1445,10 @@ export default function ViewerPanel({
 
     if (!showWaistCut) return
 
-    const slabVerts = measurementData?.landmarks?.waist_slab_vertices
-    if (!slabVerts?.length) return
+    const landmarks = activeMeasurementData?.landmarks
+    if (!landmarks?.waist_slab_vertices?.length) return
 
+    const slabVerts = landmarks.waist_slab_vertices
     const personData = personsRef.current[selectedPerson]
     if (!personData?.mesh) return
 

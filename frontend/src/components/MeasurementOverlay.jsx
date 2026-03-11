@@ -1,4 +1,4 @@
-import { Box, Heading, Text, Flex, Button, TextField, Table, Badge, IconButton, Separator } from '@radix-ui/themes'
+import { Box, Heading, Text, Flex, Button, TextField, Table, Badge, IconButton, Separator, Tabs } from '@radix-ui/themes'
 import { Ruler, AlertCircle, RefreshCw, X, Download } from 'lucide-react'
 import { translations } from '../i18n'
 import './MeasurementPanel.css'
@@ -63,7 +63,9 @@ export default function MeasurementOverlay({
   targetHeightValue,
   onTargetHeightChange,
   onApply,
-  selectedPerson
+  selectedPerson,
+  activeTab = 'posed',
+  onTabChange
 }) {
   if (!visible) return null
 
@@ -83,19 +85,19 @@ export default function MeasurementOverlay({
 
   const summaryStats = measurementData
     ? [
-        {
-          label: t.measurementPanel.actualHeight,
-          value: `${formatValue(measurementData.actual_height_cm, 'cm')} ${unitSymbol(t, 'cm')}`
-        },
-        {
-          label: t.measurementPanel.scaledHeight,
-          value: `${formatValue(measurementData.target_height_cm, 'cm')} ${unitSymbol(t, 'cm')}`
-        },
-        {
-          label: t.measurementPanel.scaleFactor,
-          value: measurementData.scale_factor?.toFixed(3)
-        }
-      ]
+      {
+        label: t.measurementPanel.actualHeight,
+        value: `${formatValue(measurementData.actual_height_cm, 'cm')} ${unitSymbol(t, 'cm')}`
+      },
+      {
+        label: t.measurementPanel.scaledHeight,
+        value: `${formatValue(measurementData.target_height_cm, 'cm')} ${unitSymbol(t, 'cm')}`
+      },
+      {
+        label: t.measurementPanel.scaleFactor,
+        value: measurementData.scale_factor?.toFixed(3)
+      }
+    ]
     : []
 
   return (
@@ -140,6 +142,19 @@ export default function MeasurementOverlay({
               </Button>
             </Flex>
           </form>
+
+          <Box mb="4">
+            <Tabs.Root value={activeTab} onValueChange={onTabChange}>
+              <Tabs.List size="2">
+                <Tabs.Trigger value="posed">
+                  {language === 'zh' ? '当前姿态测量' : 'Posed Mesh'}
+                </Tabs.Trigger>
+                <Tabs.Trigger value="tpose">
+                  {language === 'zh' ? '标准 T-Pose 测量' : 'T-Pose (Neutral)'}
+                </Tabs.Trigger>
+              </Tabs.List>
+            </Tabs.Root>
+          </Box>
 
           {measurementError && (
             <Box className="measurement-panel__error">
