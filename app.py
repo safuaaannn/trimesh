@@ -9,6 +9,7 @@ from threading import Thread
 
 import cv2
 import numpy as np
+import torch
 from flask import Flask, jsonify, request, send_from_directory
 from flask_cors import CORS
 from werkzeug.utils import secure_filename
@@ -207,6 +208,29 @@ def prepare_person_rig(person_output, template):
     }
 
 
+def _to_list(value):
+    if value is None:
+        return None
+    return np.array(value).tolist()
+
+
+def _sanitize_rig_for_client(rig_payload):
+    if not rig_payload:
+        return rig_payload
+    sanitized = dict(rig_payload)
+    meta = dict(sanitized.get("metadata") or {})
+    meta.pop("mhr_params", None)
+    meta.pop("pred_cam_t", None)
+    sanitized["metadata"] = meta
+    return sanitized
+
+
+def _sanitize_rig_list(rig_list):
+    if not rig_list:
+        return rig_list
+    return [_sanitize_rig_for_client(rig) for rig in rig_list]
+
+
 def export_rigged_models(predictions, faces, rig_template, export_dir="meshes"):
     """Export rigged models with skeleton and skinning data."""
     os.makedirs(export_dir, exist_ok=True)
@@ -279,6 +303,15 @@ def export_rigged_models(predictions, faces, rig_template, export_dir="meshes"):
                 "focal_length": float(person_output["focal_length"]),
                 "bbox": person_output["bbox"].tolist(),
                 "root_translation": rig_info["root_offset"].tolist(),
+                "pred_cam_t": _to_list(person_output.get("pred_cam_t")),
+                "mhr_params": {
+                    "global_rot": _to_list(person_output.get("global_rot")),
+                    "body_pose_params": _to_list(person_output.get("body_pose_params")),
+                    "hand_pose_params": _to_list(person_output.get("hand_pose_params")),
+                    "scale_params": _to_list(person_output.get("scale_params")),
+                    "shape_params": _to_list(person_output.get("shape_params")),
+                    "expr_params": _to_list(person_output.get("expr_params")),
+                },
             },
         }
 
@@ -517,7 +550,7 @@ def get_session_status(session_id):
         "error": session.get("error"),
     }
     if session.get("status") == "completed":
-        payload["rig_data"] = session.get("rig_data", [])
+        payload["rig_data"] = _sanitize_rig_list(session.get("rig_data", []))
 
     return jsonify(payload)
 
@@ -603,6 +636,303 @@ def calculate_measurements():
         import traceback
         traceback.print_exc()
         return jsonify({"error": "Failed to compute measurements"}), 500
+
+
+@app.route('/api/mhr/pose', methods=['GET'])
+def get_mhr_pose():
+    session_id = request.args.get("session_id")
+    if not session_id:
+        return jsonify({"error": "Missing session_id"}), 400
+
+    session = get_session(session_id)
+    if not session:
+        return jsonify({"error": "Session not found"}), 404
+
+    if session.get("status") != "completed":
+        return jsonify({"error": "Session is not ready"}), 409
+
+    try:
+        person_index = int(request.args.get("person_index", 0))
+    except (TypeError, ValueError):
+        return jsonify({"error": "Invalid person_index"}), 400
+
+    rig_data = session.get("rig_data") or []
+    if person_index < 0 or person_index >= len(rig_data):
+        return jsonify({"error": "person_index out of range"}), 400
+
+    person_rig = rig_data[person_index]
+    metadata = person_rig.get("metadata") or {}
+    mhr_params = metadata.get("mhr_params")
+    if not mhr_params:
+        return jsonify({"error": "Missing MHR parameters for session"}), 500
+
+    body_pose = mhr_params.get("body_pose_params")
+    if body_pose is None:
+        return jsonify({"error": "Missing body_pose_params"}), 500
+
+    return jsonify({
+        "person_index": person_index,
+        "body_pose_params": body_pose,
+        "length": len(body_pose),
+    })
+
+
+@app.route('/api/mhr/pose', methods=['POST'])
+def update_mhr_pose():
+    try:
+        payload = request.get_json(force=True)
+    except Exception:
+        return jsonify({"error": "Invalid JSON payload"}), 400
+
+    session_id = payload.get("session_id")
+    if not session_id:
+        return jsonify({"error": "Missing session_id"}), 400
+
+    session = get_session(session_id)
+    if not session:
+        return jsonify({"error": "Session not found"}), 404
+
+    if session.get("status") != "completed":
+        return jsonify({"error": "Session is not ready"}), 409
+
+    try:
+        person_index = int(payload.get("person_index", 0))
+    except (TypeError, ValueError):
+        return jsonify({"error": "Invalid person_index"}), 400
+
+    rig_data = session.get("rig_data") or []
+    if person_index < 0 or person_index >= len(rig_data):
+        return jsonify({"error": "person_index out of range"}), 400
+
+    body_pose_params = payload.get("body_pose_params")
+    if not isinstance(body_pose_params, list):
+        return jsonify({"error": "body_pose_params must be a list"}), 400
+
+    if estimator is None:
+        init_model()
+
+    person_rig = rig_data[person_index]
+    metadata = person_rig.get("metadata") or {}
+    mhr_params = metadata.get("mhr_params")
+    if not mhr_params:
+        return jsonify({"error": "Missing MHR parameters for session"}), 500
+
+    original_body_pose = mhr_params.get("body_pose_params")
+    if original_body_pose is None:
+        return jsonify({"error": "Missing body_pose_params"}), 500
+
+    if len(body_pose_params) != len(original_body_pose):
+        return jsonify({
+            "error": f"body_pose_params must have length {len(original_body_pose)}"
+        }), 400
+
+    pred_cam_t = metadata.get("pred_cam_t")
+
+    device = next(estimator.model.parameters()).device
+    to_tensor = lambda value: torch.tensor(value, dtype=torch.float32, device=device).unsqueeze(0)
+
+    try:
+        global_rot = to_tensor(mhr_params.get("global_rot"))
+        body_pose = to_tensor(body_pose_params)
+        hand_pose_raw = mhr_params.get("hand_pose_params")
+        hand_pose = to_tensor(hand_pose_raw) if hand_pose_raw is not None else None
+        scale_params = to_tensor(mhr_params.get("scale_params"))
+        shape_params = to_tensor(mhr_params.get("shape_params"))
+        expr_raw = mhr_params.get("expr_params")
+        expr_params = to_tensor(expr_raw) if expr_raw is not None else None
+    except Exception as exc:
+        return jsonify({"error": f"Invalid MHR parameters: {exc}"}), 500
+
+    try:
+        with torch.no_grad():
+            verts, keypoints, joint_coords = estimator.model.head_pose.mhr_forward(
+                global_trans=global_rot * 0,
+                global_rot=global_rot,
+                body_pose_params=body_pose,
+                hand_pose_params=hand_pose,
+                scale_params=scale_params,
+                shape_params=shape_params,
+                expr_params=expr_params,
+                return_keypoints=True,
+                return_joint_coords=True,
+            )
+
+        keypoints = keypoints[:, :70]
+        verts[..., [1, 2]] *= -1
+        keypoints[..., [1, 2]] *= -1
+        joint_coords[..., [1, 2]] *= -1
+
+        person_output = {
+            "pred_vertices": verts[0].detach().cpu().numpy(),
+            "pred_joint_coords": joint_coords[0].detach().cpu().numpy(),
+            "pred_keypoints_3d": keypoints[0].detach().cpu().numpy(),
+            "pred_cam_t": np.array(pred_cam_t) if pred_cam_t is not None else None,
+        }
+
+        rig_info = prepare_person_rig(person_output, RIG_TEMPLATE)
+
+        updated_metadata = dict(metadata)
+        updated_metadata["root_translation"] = rig_info["root_offset"].tolist()
+        updated_mhr_params = dict(mhr_params)
+        updated_mhr_params["body_pose_params"] = body_pose_params
+        updated_metadata["mhr_params"] = updated_mhr_params
+
+        updated_rig = {
+            "mesh": {
+                **person_rig["mesh"],
+                "vertices": rig_info["vertices"].tolist(),
+            },
+            "skeleton": {
+                **person_rig["skeleton"],
+                "joint_positions": rig_info["joint_positions"].tolist(),
+            },
+            "animation_targets": person_rig.get("animation_targets", {}),
+            "keypoints": [
+                {"name": name, "position": rig_info["keypoints"][kp_idx].tolist()}
+                for name, kp_idx in MHR70_NAME_TO_IDX.items()
+            ],
+            "metadata": updated_metadata,
+        }
+
+        rig_data[person_index] = updated_rig
+        update_session(session_id, rig_data=rig_data, num_persons=len(rig_data))
+
+        return jsonify({
+            "person_index": person_index,
+            "rig_data": _sanitize_rig_for_client(updated_rig),
+        })
+    except Exception as exc:
+        print(f"[Pose] Failed for session {session_id}: {exc}")
+        import traceback
+        traceback.print_exc()
+        return jsonify({"error": "Failed to update pose mesh"}), 500
+
+
+@app.route('/api/mhr/theta', methods=['POST'])
+def update_mhr_theta():
+    try:
+        payload = request.get_json(force=True)
+    except Exception:
+        return jsonify({"error": "Invalid JSON payload"}), 400
+
+    session_id = payload.get("session_id")
+    if not session_id:
+        return jsonify({"error": "Missing session_id"}), 400
+
+    session = get_session(session_id)
+    if not session:
+        return jsonify({"error": "Session not found"}), 404
+
+    if session.get("status") != "completed":
+        return jsonify({"error": "Session is not ready"}), 409
+
+    try:
+        person_index = int(payload.get("person_index", 0))
+    except (TypeError, ValueError):
+        return jsonify({"error": "Invalid person_index"}), 400
+
+    rig_data = session.get("rig_data") or []
+    if person_index < 0 or person_index >= len(rig_data):
+        return jsonify({"error": "person_index out of range"}), 400
+
+    try:
+        theta_scale = float(payload.get("theta_scale", 1.0))
+    except (TypeError, ValueError):
+        return jsonify({"error": "theta_scale must be numeric"}), 400
+
+    # Constrain to a safe range to avoid extreme poses
+    theta_scale = max(0.0, min(theta_scale, 2.0))
+
+    if estimator is None:
+        init_model()
+
+    person_rig = rig_data[person_index]
+    metadata = person_rig.get("metadata") or {}
+    mhr_params = metadata.get("mhr_params")
+    if not mhr_params:
+        return jsonify({"error": "Missing MHR parameters for session"}), 500
+
+    pred_cam_t = metadata.get("pred_cam_t")
+
+    device = next(estimator.model.parameters()).device
+    to_tensor = lambda value: torch.tensor(value, dtype=torch.float32, device=device).unsqueeze(0)
+
+    try:
+        global_rot = to_tensor(mhr_params.get("global_rot"))
+        body_pose = to_tensor(mhr_params.get("body_pose_params"))
+        hand_pose_raw = mhr_params.get("hand_pose_params")
+        hand_pose = to_tensor(hand_pose_raw) if hand_pose_raw is not None else None
+        scale_params = to_tensor(mhr_params.get("scale_params"))
+        shape_params = to_tensor(mhr_params.get("shape_params"))
+        expr_raw = mhr_params.get("expr_params")
+        expr_params = to_tensor(expr_raw) if expr_raw is not None else None
+    except Exception as exc:
+        return jsonify({"error": f"Invalid MHR parameters: {exc}"}), 500
+
+    body_pose = body_pose * theta_scale
+    if hand_pose is not None:
+        hand_pose = hand_pose * theta_scale
+
+    try:
+        with torch.no_grad():
+            verts, keypoints, joint_coords = estimator.model.head_pose.mhr_forward(
+                global_trans=global_rot * 0,
+                global_rot=global_rot,
+                body_pose_params=body_pose,
+                hand_pose_params=hand_pose,
+                scale_params=scale_params,
+                shape_params=shape_params,
+                expr_params=expr_params,
+                return_keypoints=True,
+                return_joint_coords=True,
+            )
+
+        keypoints = keypoints[:, :70]
+        verts[..., [1, 2]] *= -1
+        keypoints[..., [1, 2]] *= -1
+        joint_coords[..., [1, 2]] *= -1
+
+        person_output = {
+            "pred_vertices": verts[0].detach().cpu().numpy(),
+            "pred_joint_coords": joint_coords[0].detach().cpu().numpy(),
+            "pred_keypoints_3d": keypoints[0].detach().cpu().numpy(),
+            "pred_cam_t": np.array(pred_cam_t) if pred_cam_t is not None else None,
+        }
+
+        rig_info = prepare_person_rig(person_output, RIG_TEMPLATE)
+
+        updated_metadata = dict(metadata)
+        updated_metadata["root_translation"] = rig_info["root_offset"].tolist()
+
+        updated_rig = {
+            "mesh": {
+                **person_rig["mesh"],
+                "vertices": rig_info["vertices"].tolist(),
+            },
+            "skeleton": {
+                **person_rig["skeleton"],
+                "joint_positions": rig_info["joint_positions"].tolist(),
+            },
+            "animation_targets": person_rig.get("animation_targets", {}),
+            "keypoints": [
+                {"name": name, "position": rig_info["keypoints"][kp_idx].tolist()}
+                for name, kp_idx in MHR70_NAME_TO_IDX.items()
+            ],
+            "metadata": updated_metadata,
+        }
+
+        rig_data[person_index] = updated_rig
+        update_session(session_id, rig_data=rig_data, num_persons=len(rig_data))
+
+        return jsonify({
+            "person_index": person_index,
+            "rig_data": _sanitize_rig_for_client(updated_rig),
+        })
+    except Exception as exc:
+        print(f"[Theta] Failed for session {session_id}: {exc}")
+        import traceback
+        traceback.print_exc()
+        return jsonify({"error": "Failed to update theta mesh"}), 500
 
 
 # Serve React frontend

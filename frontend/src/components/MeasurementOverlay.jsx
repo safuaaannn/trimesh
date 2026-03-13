@@ -63,6 +63,7 @@ export default function MeasurementOverlay({
   targetHeightValue,
   onTargetHeightChange,
   onApply,
+  onApplyAPose,
   selectedPerson
 }) {
   if (!visible) return null
@@ -138,6 +139,17 @@ export default function MeasurementOverlay({
                 {measurementLoading ? <RefreshCw size={16} className="spin" /> : <Ruler size={16} />}
                 {t.measurementPanel.action}
               </Button>
+              {onApplyAPose && (
+                <Button
+                  type="button"
+                  size="2"
+                  variant="soft"
+                  disabled={!canSubmit}
+                  onClick={() => onApplyAPose(trimmedInput)}
+                >
+                  {t.measurementPanel.aposeAction}
+                </Button>
+              )}
             </Flex>
           </form>
 
@@ -233,4 +245,3 @@ export default function MeasurementOverlay({
     </div>
   )
 }
-

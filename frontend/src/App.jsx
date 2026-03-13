@@ -12,6 +12,21 @@ export const LanguageContext = createContext('en')
 
 const SESSION_CACHE_KEY = 'sam3d-body-session-v1'
 
+const A_POSE_ROTATIONS = {
+  left_shoulder: { x: 0, y: 0, z: 0.541052 },
+  right_shoulder: { x: 0, y: 0, z: -0.558505 },
+  left_elbow: { x: 0, y: 0, z: 0 },
+  right_elbow: { x: 0, y: 0, z: 0 }
+}
+
+const getAPoseRotations = () => {
+  const rotations = {}
+  Object.entries(A_POSE_ROTATIONS).forEach(([joint, rot]) => {
+    rotations[joint] = { x: rot.x || 0, y: rot.y || 0, z: rot.z || 0 }
+  })
+  return rotations
+}
+
 const readFileAsDataUrl = (file) => {
   return new Promise((resolve, reject) => {
     const reader = new FileReader()
@@ -53,6 +68,12 @@ function App() {
   const [measurementError, setMeasurementError] = useState(null)
   const [isMeasurementOverlayOpen, setIsMeasurementOverlayOpen] = useState(false)
   const [showIntro, setShowIntro] = useState(true)
+  const [thetaScaleByPerson, setThetaScaleByPerson] = useState({})
+  const [rawPoseTextByPerson, setRawPoseTextByPerson] = useState({})
+  const [rawPoseError, setRawPoseError] = useState(null)
+  const [rawPoseLoading, setRawPoseLoading] = useState(false)
+  const [rawPoseBaselineByPerson, setRawPoseBaselineByPerson] = useState({})
+  const [rawPoseLengthByPerson, setRawPoseLengthByPerson] = useState({})
   const pollAttemptRef = useRef(0)
   const viewerRef = useRef(null)
 
@@ -75,6 +96,11 @@ function App() {
     setTargetHeightInputs({})
     setMeasurementLoading(false)
     setMeasurementError(null)
+    setThetaScaleByPerson({})
+    setRawPoseTextByPerson({})
+    setRawPoseError(null)
+    setRawPoseBaselineByPerson({})
+    setRawPoseLengthByPerson({})
 
     try {
       const imageDataUrl = await readFileAsDataUrl(file)
@@ -144,6 +170,7 @@ function App() {
 
   // Get current person's joint rotations & measurements
   const currentJointRotations = jointRotationsByPerson[selectedPerson] || {}
+  const currentThetaScale = thetaScaleByPerson[selectedPerson] ?? 1
   const currentMeasurement = measurementsByPerson[selectedPerson]
   const targetHeightValue = targetHeightInputs[selectedPerson] ??
     (currentMeasurement?.target_height_cm ? Number(currentMeasurement.target_height_cm).toFixed(1) : '')
@@ -168,6 +195,9 @@ function App() {
     setMeasurementError(null)
     setIsMeasurementOverlayOpen(false)
     setRestoringSession(false)
+    setThetaScaleByPerson({})
+    setRawPoseTextByPerson({})
+    setRawPoseError(null)
     pollAttemptRef.current = 0
   }, [clearSessionCache])
 
@@ -181,23 +211,12 @@ function App() {
     handleImageUpload(file)
   }, [cachedImageInfo, handleImageUpload, loading])
 
-  const fetchMeasurements = useCallback(async (personIndex, targetHeightCm) => {
+  const sendMeasurements = useCallback(async (personIndex, targetHeightCm, bakedVertices = null) => {
     if (!sessionMeta?.sessionId) return
     setMeasurementLoading(true)
     setMeasurementError(null)
 
     try {
-      // Check if user has applied slider rotations
-      const rotations = jointRotationsByPerson[personIndex]
-      const hasCustomPose = rotations && Object.values(rotations).some(
-        r => r.x !== 0 || r.y !== 0 || r.z !== 0
-      )
-
-      let bakedVertices = null
-      if (hasCustomPose && viewerRef.current?.bakeSkinnedVertices) {
-        bakedVertices = viewerRef.current.bakeSkinnedVertices(personIndex)
-      }
-
       const res = await fetch('/api/measurements', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -235,7 +254,24 @@ function App() {
     } finally {
       setMeasurementLoading(false)
     }
-  }, [sessionMeta?.sessionId, jointRotationsByPerson])
+  }, [sessionMeta?.sessionId])
+
+  const fetchMeasurements = useCallback(async (personIndex, targetHeightCm) => {
+    if (!sessionMeta?.sessionId) return
+
+    // Check if user has applied slider rotations
+    const rotations = jointRotationsByPerson[personIndex]
+    const hasCustomPose = rotations && Object.values(rotations).some(
+      r => r.x !== 0 || r.y !== 0 || r.z !== 0
+    )
+
+    let bakedVertices = null
+    if (hasCustomPose && viewerRef.current?.bakeSkinnedVertices) {
+      bakedVertices = viewerRef.current.bakeSkinnedVertices(personIndex)
+    }
+
+    await sendMeasurements(personIndex, targetHeightCm, bakedVertices)
+  }, [sessionMeta?.sessionId, jointRotationsByPerson, sendMeasurements])
 
   const handleMeasurementHeightChange = useCallback((personIndex, value) => {
     setTargetHeightInputs(prev => ({
@@ -245,20 +281,343 @@ function App() {
     setMeasurementError(null)
   }, [])
 
-  const handleMeasurementApply = useCallback((personIndex, value) => {
+  const parseTargetHeight = useCallback((value) => {
     const trimmed = (value ?? '').trim()
     if (!trimmed) {
       setMeasurementError(language === 'zh' ? '请输入目标身高' : 'Please enter a target height')
-      return
+      return null
     }
 
     const parsed = parseFloat(trimmed)
     if (!Number.isFinite(parsed) || parsed <= 0) {
       setMeasurementError(language === 'zh' ? '目标身高必须为正数' : 'Target height must be a positive number')
+      return null
+    }
+    return parsed
+  }, [language])
+
+  const handleMeasurementApply = useCallback((personIndex, value) => {
+    const parsed = parseTargetHeight(value)
+    if (parsed == null) return
+    fetchMeasurements(personIndex, parsed)
+  }, [fetchMeasurements, parseTargetHeight])
+
+  const handleNormalizeToAPose = useCallback((personIndex) => {
+    const aPose = getAPoseRotations()
+    setJointRotationsByPerson(prev => ({
+      ...prev,
+      [personIndex]: aPose
+    }))
+  }, [])
+
+  const handleMeasureInAPose = useCallback(async (personIndex, targetHeightCm) => {
+    if (!viewerRef.current?.bakeSkinnedVertices) {
+      setMeasurementError(language === 'zh' ? '无法读取网格数据' : 'Unable to read mesh data')
       return
     }
-    fetchMeasurements(personIndex, parsed)
-  }, [fetchMeasurements, language])
+
+    const previous = jointRotationsByPerson[personIndex] || {}
+    const aPose = getAPoseRotations()
+    setJointRotationsByPerson(prev => ({
+      ...prev,
+      [personIndex]: aPose
+    }))
+
+    await new Promise((resolve) => requestAnimationFrame(resolve))
+
+    const baked = viewerRef.current.bakeSkinnedVertices(personIndex)
+    setJointRotationsByPerson(prev => ({
+      ...prev,
+      [personIndex]: previous
+    }))
+
+    if (!baked) {
+      setMeasurementError(language === 'zh' ? '无法生成烘焙网格' : 'Failed to bake mesh')
+      return
+    }
+
+    await sendMeasurements(personIndex, targetHeightCm, baked)
+  }, [jointRotationsByPerson, language, sendMeasurements])
+
+  const handleMeasureInAPoseApply = useCallback((personIndex, value) => {
+    const parsed = parseTargetHeight(value)
+    if (parsed == null) return
+    handleMeasureInAPose(personIndex, parsed)
+  }, [handleMeasureInAPose, parseTargetHeight])
+
+  const handleThetaScaleChange = useCallback((personIndex, value) => {
+    setThetaScaleByPerson(prev => ({
+      ...prev,
+      [personIndex]: value
+    }))
+  }, [])
+
+  const handleThetaScaleCommit = useCallback(async (personIndex, value) => {
+    if (!sessionMeta?.sessionId || !rigData) return
+
+    try {
+      const res = await fetch('/api/mhr/theta', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          session_id: sessionMeta.sessionId,
+          person_index: personIndex,
+          theta_scale: value
+        })
+      })
+
+      if (!res.ok) {
+        const data = await res.json().catch(() => ({}))
+        throw new Error(data.error || 'Failed to update theta mesh')
+      }
+
+      const data = await res.json()
+      if (!data?.rig_data) return
+
+      if (viewerRef.current?.applyRigUpdate) {
+        viewerRef.current.applyRigUpdate(personIndex, data.rig_data)
+      }
+
+      setRigData(prev => {
+        if (!prev?.rig_data?.[personIndex]) return prev
+        const nextRig = prev.rig_data.slice()
+        const existing = nextRig[personIndex]
+        const updated = data.rig_data
+        nextRig[personIndex] = {
+          ...existing,
+          ...updated,
+          mesh: {
+            ...existing.mesh,
+            ...updated.mesh
+          },
+          skeleton: {
+            ...existing.skeleton,
+            ...updated.skeleton
+          },
+          metadata: {
+            ...existing.metadata,
+            ...updated.metadata
+          },
+          keypoints: updated.keypoints || existing.keypoints
+        }
+        return { ...prev, rig_data: nextRig }
+      })
+    } catch (err) {
+      console.error('Theta update error:', err)
+    }
+  }, [rigData, sessionMeta?.sessionId])
+
+  const handleRawPoseTextChange = useCallback((personIndex, value) => {
+    setRawPoseTextByPerson(prev => ({
+      ...prev,
+      [personIndex]: value
+    }))
+    setRawPoseError(null)
+  }, [])
+
+  const parseRawPose = (text) => {
+    const raw = String(text || '')
+    const matches = raw.match(/[-+]?\d*\.?\d+(?:[eE][-+]?\d+)?/g) || []
+    let tokens = matches
+    if (tokens.length >= 5) {
+      const headerA = ['1', '2', '3', '4', '5']
+      const headerB = ['2', '3', '4', '5', '6']
+      const firstFive = tokens.slice(0, 5)
+      const isHeaderA = headerA.every((v, i) => firstFive[i] === v)
+      const isHeaderB = headerB.every((v, i) => firstFive[i] === v)
+      if (isHeaderA || isHeaderB) {
+        tokens = tokens.slice(5)
+      }
+    }
+    const values = tokens.map(v => Number.parseFloat(v))
+    if (values.some(v => !Number.isFinite(v))) {
+      return { values: null, error: 'Pose contains non-numeric values.' }
+    }
+    return { values, error: null }
+  }
+
+  const handleLoadRawPose = useCallback(async (personIndex) => {
+    if (!sessionMeta?.sessionId) return
+    setRawPoseLoading(true)
+    setRawPoseError(null)
+
+    try {
+      const res = await fetch(`/api/mhr/pose?session_id=${sessionMeta.sessionId}&person_index=${personIndex}`)
+      if (!res.ok) {
+        const data = await res.json().catch(() => ({}))
+        throw new Error(data.error || 'Failed to load pose')
+      }
+      const data = await res.json()
+      const poseText = Array.isArray(data.body_pose_params)
+        ? data.body_pose_params.join(', ')
+        : ''
+      setRawPoseTextByPerson(prev => ({
+        ...prev,
+        [personIndex]: poseText
+      }))
+      if (Array.isArray(data.body_pose_params)) {
+        setRawPoseBaselineByPerson(prev => ({
+          ...prev,
+          [personIndex]: data.body_pose_params
+        }))
+        const lengthValue = Number.isFinite(data.length)
+          ? data.length
+          : data.body_pose_params.length
+        setRawPoseLengthByPerson(prev => ({
+          ...prev,
+          [personIndex]: lengthValue
+        }))
+      }
+    } catch (err) {
+      setRawPoseError(err.message)
+    } finally {
+      setRawPoseLoading(false)
+    }
+  }, [sessionMeta?.sessionId])
+
+  const getCurrentPoseBaseline = useCallback(async (personIndex) => {
+    const cached = rawPoseBaselineByPerson[personIndex]
+    const expectedLength = rawPoseLengthByPerson[personIndex]
+    if (Array.isArray(cached) && (!expectedLength || cached.length === expectedLength)) {
+      return cached
+    }
+    if (!sessionMeta?.sessionId) return null
+    try {
+      const res = await fetch(`/api/mhr/pose?session_id=${sessionMeta.sessionId}&person_index=${personIndex}`)
+      if (!res.ok) return null
+      const data = await res.json()
+      if (Array.isArray(data.body_pose_params)) {
+        setRawPoseBaselineByPerson(prev => ({
+          ...prev,
+          [personIndex]: data.body_pose_params
+        }))
+        const lengthValue = Number.isFinite(data.length)
+          ? data.length
+          : data.body_pose_params.length
+        setRawPoseLengthByPerson(prev => ({
+          ...prev,
+          [personIndex]: lengthValue
+        }))
+        return data.body_pose_params
+      }
+      return null
+    } catch {
+      return null
+    }
+  }, [rawPoseBaselineByPerson, rawPoseLengthByPerson, sessionMeta?.sessionId])
+
+  const handleApplyRawPose = useCallback(async (personIndex, text) => {
+    if (!sessionMeta?.sessionId || !rigData) return
+
+    const { values, error } = parseRawPose(text || '')
+    if (error) {
+      setRawPoseError(error)
+      return
+    }
+
+    let expectedLength = rawPoseLengthByPerson[personIndex]
+    if (!expectedLength) {
+      const baseline = await getCurrentPoseBaseline(personIndex)
+      if (Array.isArray(baseline)) {
+        expectedLength = baseline.length
+      }
+    }
+    if (!expectedLength && Array.isArray(values)) {
+      expectedLength = values.length
+    }
+    if (!expectedLength) expectedLength = 130
+
+    let normalizedValues = values
+    if (normalizedValues && normalizedValues.length > expectedLength) {
+      normalizedValues = normalizedValues.slice(0, expectedLength)
+    } else if (normalizedValues && normalizedValues.length < expectedLength) {
+      const baseline = await getCurrentPoseBaseline(personIndex)
+      if (!baseline || baseline.length !== expectedLength) {
+        setRawPoseError(`Pose must have exactly ${expectedLength} values.`)
+        return
+      }
+      const filled = baseline.slice()
+      for (let i = 0; i < normalizedValues.length; i++) {
+        filled[i] = normalizedValues[i]
+      }
+      normalizedValues = filled
+    }
+
+    if (!normalizedValues || normalizedValues.length !== expectedLength) {
+      setRawPoseError(`Pose must have exactly ${expectedLength} values.`)
+      return
+    }
+
+    setRawPoseTextByPerson(prev => ({
+      ...prev,
+      [personIndex]: normalizedValues.join(', ')
+    }))
+    setRawPoseLengthByPerson(prev => ({
+      ...prev,
+      [personIndex]: expectedLength
+    }))
+
+    setRawPoseLoading(true)
+    setRawPoseError(null)
+
+    try {
+      const res = await fetch('/api/mhr/pose', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          session_id: sessionMeta.sessionId,
+          person_index: personIndex,
+          body_pose_params: normalizedValues
+        })
+      })
+
+      if (!res.ok) {
+        const data = await res.json().catch(() => ({}))
+        throw new Error(data.error || 'Failed to apply pose')
+      }
+
+      const data = await res.json()
+      if (!data?.rig_data) return
+
+      if (viewerRef.current?.applyRigUpdate) {
+        viewerRef.current.applyRigUpdate(personIndex, data.rig_data)
+      }
+
+      setRawPoseBaselineByPerson(prev => ({
+        ...prev,
+        [personIndex]: normalizedValues
+      }))
+
+      setRigData(prev => {
+        if (!prev?.rig_data?.[personIndex]) return prev
+        const nextRig = prev.rig_data.slice()
+        const existing = nextRig[personIndex]
+        const updated = data.rig_data
+        nextRig[personIndex] = {
+          ...existing,
+          ...updated,
+          mesh: {
+            ...existing.mesh,
+            ...updated.mesh
+          },
+          skeleton: {
+            ...existing.skeleton,
+            ...updated.skeleton
+          },
+          metadata: {
+            ...existing.metadata,
+            ...updated.metadata
+          },
+          keypoints: updated.keypoints || existing.keypoints
+        }
+        return { ...prev, rig_data: nextRig }
+      })
+    } catch (err) {
+      setRawPoseError(err.message)
+    } finally {
+      setRawPoseLoading(false)
+    }
+  }, [rigData, sessionMeta?.sessionId, getCurrentPoseBaseline, rawPoseLengthByPerson])
 
   useEffect(() => {
     if (typeof window === 'undefined') return
@@ -475,6 +834,36 @@ function App() {
     }
   }, [rigData])
 
+  useEffect(() => {
+    if (!sessionMeta?.sessionId || !rigData) return
+    if (rawPoseLengthByPerson[selectedPerson]) return
+
+    let active = true
+    const fetchLength = async () => {
+      try {
+        const res = await fetch(`/api/mhr/pose?session_id=${sessionMeta.sessionId}&person_index=${selectedPerson}`)
+        if (!res.ok) return
+        const data = await res.json()
+        if (!Array.isArray(data.body_pose_params)) return
+        const lengthValue = Number.isFinite(data.length)
+          ? data.length
+          : data.body_pose_params.length
+        if (!active) return
+        setRawPoseLengthByPerson(prev => ({
+          ...prev,
+          [selectedPerson]: lengthValue
+        }))
+      } catch {
+        // Ignore fetch errors; will be retried on demand.
+      }
+    }
+
+    fetchLength()
+    return () => {
+      active = false
+    }
+  }, [sessionMeta?.sessionId, rigData, selectedPerson, rawPoseLengthByPerson])
+
   const t = translations[language]
   const currentYear = new Date().getFullYear()
 
@@ -510,9 +899,20 @@ function App() {
                 jointRotations={currentJointRotations}
                 onJointRotationChange={handleJointRotationChange}
                 onResetPose={handleResetPose}
+                onNormalizeAPose={() => handleNormalizeToAPose(selectedPerson)}
                 showJoints={showJoints}
                 onToggleJoints={setShowJoints}
                 language={language}
+                thetaScale={currentThetaScale}
+                onThetaScaleChange={(value) => handleThetaScaleChange(selectedPerson, value)}
+                onThetaScaleCommit={(value) => handleThetaScaleCommit(selectedPerson, value)}
+                rawPoseText={rawPoseTextByPerson[selectedPerson]}
+                rawPoseError={rawPoseError}
+                rawPoseLoading={rawPoseLoading}
+                rawPoseExpectedLength={rawPoseLengthByPerson[selectedPerson]}
+                onRawPoseTextChange={(value) => handleRawPoseTextChange(selectedPerson, value)}
+                onLoadRawPose={() => handleLoadRawPose(selectedPerson)}
+                onApplyRawPose={() => handleApplyRawPose(selectedPerson, rawPoseTextByPerson[selectedPerson])}
               />
             )}
           </Box>
@@ -554,6 +954,7 @@ function App() {
                 targetHeightValue={targetHeightValue}
                 onTargetHeightChange={(value) => handleMeasurementHeightChange(selectedPerson, value)}
                 onApply={(value) => handleMeasurementApply(selectedPerson, value)}
+                onApplyAPose={(value) => handleMeasureInAPoseApply(selectedPerson, value)}
                 onExport={handleMeasurementExport}
               />
             </div>

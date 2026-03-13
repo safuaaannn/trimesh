@@ -1,14 +1,49 @@
 import { Box, Text, Flex } from '@radix-ui/themes'
+import { useEffect, useMemo, useState } from 'react'
 import * as Slider from '@radix-ui/react-slider'
 import { translations } from '../i18n'
 import './JointControl.css'
 
 export default function JointControl({ jointName, displayName, rotation, onChange, language }) {
   const t = translations[language]
+  const degrees = useMemo(() => ({
+    x: rotation.x * (180 / Math.PI),
+    y: rotation.y * (180 / Math.PI),
+    z: rotation.z * (180 / Math.PI)
+  }), [rotation])
+
+  const [inputValues, setInputValues] = useState({
+    x: degrees.x.toFixed(0),
+    y: degrees.y.toFixed(0),
+    z: degrees.z.toFixed(0)
+  })
+
+  useEffect(() => {
+    setInputValues({
+      x: degrees.x.toFixed(0),
+      y: degrees.y.toFixed(0),
+      z: degrees.z.toFixed(0)
+    })
+  }, [degrees])
 
   const handleChange = (axis, values) => {
     const value = (values[0] / 100) * Math.PI * 2 - Math.PI
     onChange(jointName, axis, value)
+  }
+
+  const handleInputChange = (axis, value) => {
+    setInputValues(prev => ({ ...prev, [axis]: value }))
+  }
+
+  const commitInput = (axis) => {
+    const raw = inputValues[axis]
+    const parsed = parseFloat(raw)
+    if (!Number.isFinite(parsed)) {
+      setInputValues(prev => ({ ...prev, [axis]: degrees[axis].toFixed(0) }))
+      return
+    }
+    const clamped = Math.max(-180, Math.min(180, parsed))
+    onChange(jointName, axis, (clamped * Math.PI) / 180)
   }
 
   const getSliderValue = (radians) => {
@@ -37,9 +72,17 @@ export default function JointControl({ jointName, displayName, rotation, onChang
             </Slider.Track>
             <Slider.Thumb className="slider-thumb" />
           </Slider.Root>
-          <Text size="1" className="value-display">
-            {(rotation.x * (180 / Math.PI)).toFixed(0)}°
-          </Text>
+          <input
+            className="axis-input"
+            type="number"
+            step="1"
+            min="-180"
+            max="180"
+            value={inputValues.x}
+            onChange={(e) => handleInputChange('x', e.target.value)}
+            onBlur={() => commitInput('x')}
+            onKeyDown={(e) => { if (e.key === 'Enter') e.currentTarget.blur() }}
+          />
         </Flex>
 
         <Flex align="center" gap="2" mb="1">
@@ -57,9 +100,17 @@ export default function JointControl({ jointName, displayName, rotation, onChang
             </Slider.Track>
             <Slider.Thumb className="slider-thumb" />
           </Slider.Root>
-          <Text size="1" className="value-display">
-            {(rotation.y * (180 / Math.PI)).toFixed(0)}°
-          </Text>
+          <input
+            className="axis-input"
+            type="number"
+            step="1"
+            min="-180"
+            max="180"
+            value={inputValues.y}
+            onChange={(e) => handleInputChange('y', e.target.value)}
+            onBlur={() => commitInput('y')}
+            onKeyDown={(e) => { if (e.key === 'Enter') e.currentTarget.blur() }}
+          />
         </Flex>
 
         <Flex align="center" gap="2">
@@ -77,9 +128,17 @@ export default function JointControl({ jointName, displayName, rotation, onChang
             </Slider.Track>
             <Slider.Thumb className="slider-thumb" />
           </Slider.Root>
-          <Text size="1" className="value-display">
-            {(rotation.z * (180 / Math.PI)).toFixed(0)}°
-          </Text>
+          <input
+            className="axis-input"
+            type="number"
+            step="1"
+            min="-180"
+            max="180"
+            value={inputValues.z}
+            onChange={(e) => handleInputChange('z', e.target.value)}
+            onBlur={() => commitInput('z')}
+            onKeyDown={(e) => { if (e.key === 'Enter') e.currentTarget.blur() }}
+          />
         </Flex>
       </Box>
     </Box>

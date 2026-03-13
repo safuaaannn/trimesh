@@ -37,6 +37,24 @@
   color: var(--gray-11);
 }
 
+.axis-input {
+  width: 48px;
+  padding: 2px 6px;
+  text-align: right;
+  font-family: monospace;
+  font-size: 12px;
+  color: var(--gray-12);
+  background: var(--gray-2);
+  border: 1px solid var(--gray-6);
+  border-radius: 6px;
+}
+
+.axis-input:focus {
+  outline: none;
+  border-color: var(--accent-8);
+  box-shadow: 0 0 0 2px var(--accent-a5);
+}
+
 .slider-root {
   position: relative;
   display: flex;

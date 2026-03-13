@@ -24,6 +24,7 @@ const ViewerPanel = forwardRef(function ViewerPanel({
   const frameIdRef = useRef(null)
   const raycasterRef = useRef(null)
   const mouseRef = useRef(new THREE.Vector2())
+  const centerRef = useRef({ x: 0, z: 0 })
   const chestVisualsRef = useRef(null) // Chest ring + landmark spheres
   const waistVisualsRef = useRef(null) // Waist ring + landmark spheres
   const hipVisualsRef = useRef(null)   // Hip ring + pubic bone landmark sphere
@@ -42,7 +43,7 @@ const ViewerPanel = forwardRef(function ViewerPanel({
 
   const t = translations[language]
 
-  // Expose bakeSkinnedVertices to parent via ref
+  // Expose mesh utilities to parent via ref
   useImperativeHandle(ref, () => ({
     /**
      * Extract deformed vertex positions from the GPU-skinned mesh.
@@ -86,8 +87,114 @@ const ViewerPanel = forwardRef(function ViewerPanel({
 
       console.log(`[Viewer] Baked ${vertexCount} vertices for person ${personIndex}`)
       return bakedVertices
+    },
+
+    /**
+     * Update a person's mesh + joint helpers from fresh rig data.
+     * Keeps the scene intact while replacing vertex positions and helper visuals.
+     */
+    applyRigUpdate(personIndex, rigData) {
+      const personData = personsRef.current[personIndex]
+      if (!personData?.mesh || !rigData?.mesh || !rigData?.skeleton) return
+
+      const { mesh, skeleton: skel, metadata } = rigData
+      const skinnedMesh = personData.mesh
+      const geometry = skinnedMesh.geometry
+
+      const flatVerts = new Float32Array(mesh.vertices.flat())
+      const posAttr = geometry.getAttribute('position')
+      if (posAttr && posAttr.count * 3 === flatVerts.length) {
+        posAttr.array.set(flatVerts)
+        posAttr.needsUpdate = true
+      } else {
+        geometry.setAttribute('position', new THREE.BufferAttribute(flatVerts, 3))
+      }
+      geometry.computeVertexNormals()
+
+      if (metadata && metadata.root_translation) {
+        const rootTrans = metadata.root_translation
+        const relativeX = rootTrans[0] - centerRef.current.x
+        const relativeZ = rootTrans[2] - centerRef.current.z
+        skinnedMesh.position.set(relativeX, 0, -relativeZ)
+        geometry.computeBoundingBox()
+        const bbox = geometry.boundingBox
+        if (bbox) {
+          const minY = bbox.min.y
+          skinnedMesh.position.y = -minY
+        }
+      }
+
+      // Replace helper visuals (joints + bones)
+      if (personData.helpers) {
+        sceneRef.current.remove(personData.helpers)
+        personData.helpers.traverse(child => {
+          if (child.geometry) child.geometry.dispose()
+          if (child.material) child.material.dispose()
+        })
+      }
+
+      const isSelected = personIndex === selectedPerson
+      const helpersGroup = new THREE.Group()
+
+      // Joint spheres
+      skel.joint_positions.forEach((pos) => {
+        const sphere = new THREE.Mesh(
+          new THREE.SphereGeometry(0.02, 12, 12),
+          new THREE.MeshBasicMaterial({
+            color: isSelected ? 0xff6688 : 0xff4466
+          })
+        )
+        sphere.position.set(pos[0], pos[1], pos[2])
+        helpersGroup.add(sphere)
+      })
+
+      // Bone lines
+      const linePairs = []
+      skel.parents.forEach((parentIdx, childIdx) => {
+        if (parentIdx >= 0) {
+          linePairs.push([parentIdx, childIdx])
+        }
+      })
+
+      if (linePairs.length > 0) {
+        const linePositions = new Float32Array(linePairs.length * 6)
+        linePairs.forEach(([pIdx, cIdx], i) => {
+          const pPos = skel.joint_positions[pIdx]
+          const cPos = skel.joint_positions[cIdx]
+          const offset = i * 6
+          linePositions[offset + 0] = pPos[0]
+          linePositions[offset + 1] = pPos[1]
+          linePositions[offset + 2] = pPos[2]
+          linePositions[offset + 3] = cPos[0]
+          linePositions[offset + 4] = cPos[1]
+          linePositions[offset + 5] = cPos[2]
+        })
+
+        const lineGeometry = new THREE.BufferGeometry()
+        lineGeometry.setAttribute('position', new THREE.BufferAttribute(linePositions, 3))
+        const lines = new THREE.LineSegments(
+          lineGeometry,
+          new THREE.LineBasicMaterial({
+            color: isSelected ? 0x77ccff : 0x55aaff
+          })
+        )
+        helpersGroup.add(lines)
+      }
+
+      if (metadata && metadata.root_translation) {
+        const rootTrans = metadata.root_translation
+        const relativeX = rootTrans[0] - centerRef.current.x
+        const relativeZ = rootTrans[2] - centerRef.current.z
+        helpersGroup.position.set(relativeX, skinnedMesh.position.y, -relativeZ)
+      }
+
+      helpersGroup.visible = showJoints
+      sceneRef.current.add(helpersGroup)
+
+      personData.helpers = helpersGroup
+      personData.animationTargets = rigData.animation_targets || personData.animationTargets
     }
-  }), [])
+  }), [selectedPerson, showJoints])
 
   // Initialize Three.js scene once
   useEffect(() => {
@@ -415,6 +522,7 @@ const ViewerPanel = forwardRef(function ViewerPanel({
         centerX /= rootTranslations.length
         centerZ /= rootTranslations.length
       }
+      centerRef.current = { x: centerX, z: centerZ }
 
       // Load each person
       allRigData.forEach((rigData, personIndex) => {

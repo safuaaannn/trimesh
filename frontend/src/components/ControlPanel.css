@@ -33,3 +33,158 @@
   flex: 1 1 120px;
   min-width: 110px;
 }
+
+.raw-pose-textarea {
+  width: 100%;
+  min-height: 120px;
+  resize: vertical;
+  padding: 8px;
+  font-family: monospace;
+  font-size: 12px;
+  color: var(--gray-12);
+  background: var(--gray-2);
+  border: 1px solid var(--gray-6);
+  border-radius: 8px;
+}
+
+.raw-pose-textarea:focus {
+  outline: none;
+  border-color: var(--accent-8);
+  box-shadow: 0 0 0 2px var(--accent-a5);
+}
+
+.raw-pose-error {
+  color: #ff6b6b;
+}
+
+.raw-pose-count {
+  font-size: 11px;
+  color: var(--gray-11);
+}
+
+.raw-pose-count-missing,
+.raw-pose-count-extra {
+  color: #ffb454;
+}
+
+.raw-pose-count-ok {
+  color: #7bd88f;
+}
+
+.raw-pose-detail {
+  font-size: 11px;
+  color: var(--gray-10);
+  font-family: monospace;
+  word-break: break-word;
+}
+
+.raw-pose-grid {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  max-height: 260px;
+  overflow: auto;
+  padding: 8px;
+  border: 1px solid var(--gray-6);
+  border-radius: 8px;
+  background: var(--gray-1);
+}
+
+.raw-pose-row {
+  display: grid;
+  grid-template-columns: 140px 1fr;
+  gap: 8px;
+  align-items: center;
+}
+
+.raw-pose-label {
+  font-size: 11px;
+  color: var(--gray-11);
+  font-weight: 600;
+  text-transform: none;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.raw-pose-values {
+  display: grid;
+  grid-template-columns: repeat(5, minmax(0, 1fr));
+  gap: 6px;
+  font-family: monospace;
+  font-size: 11px;
+  color: var(--gray-12);
+}
+
+.raw-pose-value {
+  padding: 2px 6px;
+  border-radius: 6px;
+  border: 1px solid var(--gray-5);
+  background: var(--gray-2);
+  text-align: right;
+  min-height: 18px;
+}
+
+.raw-pose-editor {
+  border: 1px solid var(--gray-6);
+  border-radius: 8px;
+  padding: 10px;
+  background: var(--gray-1);
+}
+
+.raw-pose-editor-row {
+  display: grid;
+  grid-template-columns: 120px 1fr;
+  gap: 8px;
+  align-items: center;
+  margin-bottom: 10px;
+}
+
+.raw-pose-editor-label {
+  font-size: 11px;
+  color: var(--gray-11);
+}
+
+.raw-pose-editor-select {
+  width: 100%;
+  padding: 6px 8px;
+  border-radius: 6px;
+  border: 1px solid var(--gray-6);
+  background: var(--gray-2);
+  color: var(--gray-12);
+  font-size: 12px;
+}
+
+.raw-pose-editor-values {
+  display: grid;
+  grid-template-columns: repeat(5, minmax(0, 1fr));
+  gap: 8px;
+  margin-bottom: 10px;
+}
+
+.raw-pose-editor-cell {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.raw-pose-editor-index {
+  font-size: 10px;
+  color: var(--gray-10);
+}
+
+.raw-pose-editor-input {
+  padding: 6px 8px;
+  border-radius: 6px;
+  border: 1px solid var(--gray-6);
+  background: var(--gray-2);
+  color: var(--gray-12);
+  font-size: 12px;
+  font-family: monospace;
+}
+
+.raw-pose-editor-input:focus {
+  outline: none;
+  border-color: var(--accent-8);
+  box-shadow: 0 0 0 2px var(--accent-a5);
+}

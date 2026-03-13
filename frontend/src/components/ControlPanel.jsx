@@ -1,9 +1,10 @@
 import { Box, Heading, Text, Button, Flex, ScrollArea, Tabs, Switch, Select } from '@radix-ui/themes'
+import * as Slider from '@radix-ui/react-slider'
 import { RotateCcw, User, ChevronDown, ChevronUp } from 'lucide-react'
 import JointControl from './JointControl'
 import { translations, getJointDisplayName } from '../i18n'
 import './ControlPanel.css'
-import { useState } from 'react'
+import { useCallback, useEffect, useMemo, useState } from 'react'
 
 const BODY_PARTS = {
   upperBody: ['head', 'left_shoulder', 'right_shoulder', 'left_elbow', 'right_elbow', 'left_wrist', 'right_wrist'],
@@ -35,17 +36,148 @@ export default function ControlPanel({
   jointRotations,
   onJointRotationChange,
   onResetPose,
+  onNormalizeAPose,
   showJoints,
   onToggleJoints,
-  language
+  language,
+  thetaScale,
+  onThetaScaleChange,
+  onThetaScaleCommit,
+  rawPoseText,
+  rawPoseError,
+  rawPoseLoading,
+  rawPoseExpectedLength,
+  onRawPoseTextChange,
+  onLoadRawPose,
+  onApplyRawPose
 }) {
   const [showDebug, setShowDebug] = useState(false)
+  const [showRawPose, setShowRawPose] = useState(false)
+  const [poseEditorJoint, setPoseEditorJoint] = useState(0)
+  const [poseEditorValues, setPoseEditorValues] = useState(Array(5).fill(''))
 
   if (!rigData) return null
 
   const t = translations[language]
   const currentRig = rigData.rig_data[selectedPerson]
   const animationTargets = currentRig?.animation_targets || {}
+  const thetaPercent = Math.round((thetaScale ?? 1) * 100)
+  const poseJointNames = currentRig?.skeleton?.joint_names || []
+
+  const stripHeaderTokens = useCallback((tokens) => {
+    if (!tokens || tokens.length < 5) return tokens || []
+    const headerA = ['1', '2', '3', '4', '5']
+    const headerB = ['2', '3', '4', '5', '6']
+    const firstFive = tokens.slice(0, 5)
+    const isHeaderA = headerA.every((v, i) => firstFive[i] === v)
+    const isHeaderB = headerB.every((v, i) => firstFive[i] === v)
+    if (isHeaderA || isHeaderB) {
+      return tokens.slice(5)
+    }
+    return tokens
+  }, [])
+
+  const rawPoseTokens = useMemo(() => {
+    if (!rawPoseText) return []
+    const matches = String(rawPoseText).match(/[-+]?\d*\.?\d+(?:[eE][-+]?\d+)?/g) || []
+    return stripHeaderTokens(matches)
+  }, [rawPoseText, stripHeaderTokens])
+  const expectedLength = Number.isFinite(rawPoseExpectedLength) ? rawPoseExpectedLength : 130
+  const expectedJointCount = Math.ceil(expectedLength / 5)
+  const rawPoseCount = rawPoseTokens.length
+  const rawPoseDiff = rawPoseCount - expectedLength
+  const rawPoseStatus = rawPoseDiff === 0 ? 'ok' : rawPoseDiff > 0 ? 'extra' : 'missing'
+  const rawPoseMissing = rawPoseDiff < 0 ? Math.abs(rawPoseDiff) : 0
+  const rawPoseExtra = rawPoseDiff > 0 ? rawPoseDiff : 0
+  const rawPoseDetail = useMemo(() => {
+    if (rawPoseStatus === 'missing') {
+      const start = rawPoseCount + 1
+      return `${t.rawPoseMissing} ${rawPoseMissing} (${t.rawPosePositions} ${start}-${expectedLength})`
+    }
+    if (rawPoseStatus === 'extra') {
+      const extras = rawPoseTokens.slice(expectedLength, expectedLength + Math.min(5, rawPoseExtra)).join(', ')
+      return `${t.rawPoseExtra} ${rawPoseExtra} (${t.rawPosePositions} ${expectedLength + 1}-${rawPoseCount}: ${extras})`
+    }
+    return null
+  }, [rawPoseStatus, rawPoseCount, rawPoseMissing, rawPoseExtra, rawPoseTokens, t, expectedLength])
+
+  const templateHint = useMemo(() => {
+    const base = expectedLength % 5 === 0 ? t.rawPoseTemplateHint : t.rawPoseTemplateHintSimple
+    return base
+      .replace('{count}', String(expectedLength))
+      .replace('{joints}', String(expectedJointCount))
+  }, [t, expectedLength, expectedJointCount])
+
+  const insertZerosLabel = useMemo(() => {
+    return t.rawPoseInsertZeros.replace('{count}', String(expectedLength))
+  }, [t, expectedLength])
+
+  const poseGroupSize = 5
+  const poseJointCount = Math.ceil(Math.max(rawPoseTokens.length, expectedLength) / poseGroupSize)
+  const poseJointLabels = useMemo(() => {
+    const count = Math.max(expectedJointCount, poseJointCount)
+    return Array.from({ length: count }, (_, idx) => {
+      const jointName = poseJointNames[idx] || `joint_${idx}`
+      return getJointDisplayName(jointName, language)
+    })
+  }, [poseJointCount, poseJointNames, language, expectedJointCount])
+  const poseValueStrings = useMemo(() => {
+    const base = rawPoseTokens.slice(0, expectedLength)
+    const filled = Array.from({ length: expectedLength }, (_, idx) => base[idx] ?? '0')
+    return filled
+  }, [rawPoseTokens, expectedLength])
+  const poseRows = useMemo(() => {
+    if (!rawPoseTokens.length) return []
+    const rows = []
+    for (let i = 0; i < poseJointCount; i++) {
+      const jointName = poseJointNames[i] || `joint_${i}`
+      const label = getJointDisplayName(jointName, language)
+      const start = i * poseGroupSize
+      rows.push({
+        label,
+        values: rawPoseTokens.slice(start, start + poseGroupSize)
+      })
+    }
+    return rows
+  }, [rawPoseTokens, poseJointCount, poseJointNames, language])
+
+  const handlePoseEditorValueChange = (index, value) => {
+    setPoseEditorValues(prev => {
+      const next = prev.slice()
+      next[index] = value
+      return next
+    })
+  }
+
+  const handleApplyPoseEditor = () => {
+    const next = poseValueStrings.slice()
+    const start = poseEditorJoint * poseGroupSize
+    for (let i = 0; i < poseGroupSize; i++) {
+      const raw = poseEditorValues[i]
+      const parsed = Number.parseFloat(raw)
+      next[start + i] = Number.isFinite(parsed) ? String(parsed) : '0'
+    }
+    onRawPoseTextChange?.(next.join(', '))
+  }
+
+  const handleCleanRawPose = () => {
+    const text = String(rawPoseText || '')
+    const matches = text.match(/[-+]?\d*\.?\d+(?:[eE][-+]?\d+)?/g) || []
+    const cleaned = stripHeaderTokens(matches)
+    const trimmed = cleaned.slice(0, expectedLength)
+    onRawPoseTextChange?.(trimmed.join(', '))
+  }
+
+  const handleInsertZeros = () => {
+    const zeros = Array.from({ length: expectedLength }, () => '0')
+    onRawPoseTextChange?.(zeros.join(', '))
+  }
+
+  useEffect(() => {
+    const start = poseEditorJoint * poseGroupSize
+    const values = poseValueStrings.slice(start, start + poseGroupSize)
+    setPoseEditorValues(values)
+  }, [poseEditorJoint, poseValueStrings])
 
   console.log('[Control] All animation_targets:', animationTargets)
 
@@ -78,10 +210,15 @@ export default function ControlPanel({
         <Box p="4">
           <Flex justify="between" align="center" mb="3">
             <Heading size="4">{t.poseControls}</Heading>
-            <Button size="1" variant="soft" onClick={onResetPose}>
-              <RotateCcw size={14} />
-              {t.reset}
-            </Button>
+            <Flex gap="2">
+              <Button size="1" variant="soft" onClick={onNormalizeAPose}>
+                {t.normalizeAPose}
+              </Button>
+              <Button size="1" variant="soft" onClick={onResetPose}>
+                <RotateCcw size={14} />
+                {t.reset}
+              </Button>
+            </Flex>
           </Flex>
 
           {/* Display Options */}
@@ -95,6 +232,178 @@ export default function ControlPanel({
                 <Switch checked={showJoints} onCheckedChange={onToggleJoints} />
               </Flex>
             </Flex>
+          </Box>
+
+          {/* MHR Theta Control */}
+          <Box mb="4" p="3" style={{ background: 'var(--gray-3)', borderRadius: 'var(--radius-2)' }}>
+            <Text size="2" weight="medium" mb="2" style={{ display: 'block' }}>
+              {t.thetaControl}
+            </Text>
+            <Flex align="center" gap="2">
+              <Text size="1" className="axis-label">θ</Text>
+              <Slider.Root
+                className="slider-root"
+                value={[thetaPercent]}
+                onValueChange={(values) => onThetaScaleChange?.(values[0] / 100)}
+                onValueCommit={(values) => onThetaScaleCommit?.(values[0] / 100)}
+                min={0}
+                max={200}
+                step={1}
+              >
+                <Slider.Track className="slider-track">
+                  <Slider.Range className="slider-range" />
+                </Slider.Track>
+                <Slider.Thumb className="slider-thumb" />
+              </Slider.Root>
+              <Text size="1" className="value-display">
+                {(thetaPercent / 100).toFixed(2)}x
+              </Text>
+            </Flex>
+          </Box>
+
+          {/* Advanced Raw Pose Editor */}
+          <Box mb="4" p="3" style={{ background: 'var(--gray-3)', borderRadius: 'var(--radius-2)' }}>
+            <Flex justify="between" align="center" mb="2">
+              <Text size="2" weight="medium">
+                {t.rawPoseTitle}
+              </Text>
+              <Button
+                size="1"
+                variant="ghost"
+                onClick={() => setShowRawPose(prev => !prev)}
+              >
+                {showRawPose ? <ChevronUp size={14} /> : <ChevronDown size={14} />}
+              </Button>
+            </Flex>
+            {showRawPose && (
+              <>
+                <Text size="1" color="gray" mb="2" style={{ display: 'block' }}>
+                  {t.rawPoseHint}
+                </Text>
+                <textarea
+                  className="raw-pose-textarea"
+                  value={rawPoseText || ''}
+                  onChange={(e) => onRawPoseTextChange?.(e.target.value)}
+                  placeholder={t.rawPoseHint}
+                />
+                <Text size="1" color="gray" mt="2" style={{ display: 'block' }}>
+                  {templateHint}
+                </Text>
+                <Text size="1" color="gray" mt="1" style={{ display: 'block' }}>
+                  {t.rawPoseAutoFixHint}
+                </Text>
+                <Text
+                  size="1"
+                  className={`raw-pose-count raw-pose-count-${rawPoseStatus}`}
+                  mt="2"
+                  style={{ display: 'block' }}
+                >
+                  {t.rawPoseCount}: {rawPoseCount}/{expectedLength}
+                  {rawPoseMissing > 0 && ` · ${t.rawPoseMissing} ${rawPoseMissing}`}
+                  {rawPoseExtra > 0 && ` · ${t.rawPoseExtra} ${rawPoseExtra}`}
+                </Text>
+                {rawPoseDetail && (
+                  <Text size="1" className="raw-pose-detail" mt="1" style={{ display: 'block' }}>
+                    {rawPoseDetail}
+                  </Text>
+                )}
+                {poseRows.length > 0 && (
+                  <Box className="raw-pose-grid" mt="2">
+                    {poseRows.map((row, idx) => (
+                      <div key={`${row.label}-${idx}`} className="raw-pose-row">
+                        <span className="raw-pose-label">{row.label}</span>
+                        <div className="raw-pose-values">
+                          {Array.from({ length: poseGroupSize }).map((_, valueIdx) => (
+                            <span key={valueIdx} className="raw-pose-value">
+                              {row.values[valueIdx] ?? ''}
+                            </span>
+                          ))}
+                        </div>
+                      </div>
+                    ))}
+                  </Box>
+                )}
+                <Box className="raw-pose-editor" mt="3">
+                  <Text size="1" weight="medium" mb="2" style={{ display: 'block' }}>
+                    {t.rawPoseEditorTitle}
+                  </Text>
+                  <div className="raw-pose-editor-row">
+                    <label className="raw-pose-editor-label">{t.rawPoseSelectJoint}</label>
+                    <select
+                      className="raw-pose-editor-select"
+                      value={String(poseEditorJoint)}
+                      onChange={(e) => setPoseEditorJoint(Number(e.target.value))}
+                    >
+                      {poseJointLabels.map((label, idx) => (
+                        <option key={idx} value={String(idx)}>
+                          {idx + 1}. {label}
+                        </option>
+                      ))}
+                    </select>
+                  </div>
+                  <div className="raw-pose-editor-values">
+                    {poseEditorValues.map((value, idx) => (
+                      <div key={idx} className="raw-pose-editor-cell">
+                        <span className="raw-pose-editor-index">{idx + 1}</span>
+                        <input
+                          className="raw-pose-editor-input"
+                          type="text"
+                          inputMode="decimal"
+                          value={value}
+                          onChange={(e) => handlePoseEditorValueChange(idx, e.target.value)}
+                        />
+                      </div>
+                    ))}
+                  </div>
+                  <Button
+                    size="1"
+                    variant="soft"
+                    onClick={handleApplyPoseEditor}
+                    disabled={rawPoseLoading}
+                  >
+                    {t.rawPoseUpdateJoint}
+                  </Button>
+                </Box>
+                {rawPoseError && (
+                  <Text size="1" className="raw-pose-error" mt="2" style={{ display: 'block' }}>
+                    {rawPoseError}
+                  </Text>
+                )}
+                <Flex gap="2" mt="2">
+                  <Button
+                    size="1"
+                    variant="soft"
+                    onClick={onLoadRawPose}
+                    disabled={rawPoseLoading}
+                  >
+                    {t.rawPoseLoad}
+                  </Button>
+                  <Button
+                    size="1"
+                    variant="soft"
+                    onClick={handleInsertZeros}
+                    disabled={rawPoseLoading}
+                  >
+                    {insertZerosLabel}
+                  </Button>
+                  <Button
+                    size="1"
+                    variant="soft"
+                    onClick={handleCleanRawPose}
+                    disabled={rawPoseLoading}
+                  >
+                    {t.rawPoseClean}
+                  </Button>
+                  <Button
+                    size="1"
+                    onClick={onApplyRawPose}
+                    disabled={rawPoseLoading}
+                  >
+                    {t.rawPoseApply}
+                  </Button>
+                </Flex>
+              </>
+            )}
           </Box>
 
           {rigData.num_persons > 1 && (

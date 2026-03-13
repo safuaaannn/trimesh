@@ -141,6 +141,19 @@ def _perimeter_from_points(points: np.ndarray) -> Optional[float]:
     return float(np.linalg.norm(hull - shifted, axis=1).sum())
 
 
+def _nearest_vertex_indices(points: np.ndarray, vertices: np.ndarray) -> List[int]:
+    """Return nearest vertex index for each point (brute force)."""
+    if points is None or len(points) == 0:
+        return []
+    verts = np.asarray(vertices, dtype=float)
+    indices: List[int] = []
+    for p in np.asarray(points, dtype=float):
+        diff = verts - p
+        idx = int(np.argmin(np.einsum("ij,ij->i", diff, diff)))
+        indices.append(idx)
+    return indices
+
+
 def _slab_at_plane(vertices: np.ndarray, plane_origin: np.ndarray, plane_normal: np.ndarray, thickness: float) -> np.ndarray:
     """Select vertices within ±thickness of the given plane."""
     n = np.asarray(plane_normal, dtype=float)
@@ -2073,6 +2086,12 @@ def compute_measurements(person_rig: Dict, target_height_cm: Optional[float] = N
             right_plane_anchor_idx=_R_THIGH_RING_IDX,
         )
 
+    _thigh_ring_vertex_indices: List[int] = []
+    _thigh_ring_vertex_indices_unique: List[int] = []
+    if len(_thigh_ring_3d) > 0:
+        _thigh_ring_vertex_indices = _nearest_vertex_indices(_thigh_ring_3d, vertices)
+        _thigh_ring_vertex_indices_unique = sorted(set(_thigh_ring_vertex_indices))
+
     raw_measurements: Dict[str, Optional[float]] = {
         "body_height": actual_height_m,
         "eye_height": (eye_point[1] - ground_y) if eye_point is not None else None,
@@ -2163,6 +2182,8 @@ def compute_measurements(person_rig: Dict, target_height_cm: Optional[float] = N
         "pubic_bone_landmark": vertices[_pubic_bone_idx].astype(float).round(6).tolist(),
         # Left thigh ring visualization data (SMPLX-style)
         "left_thigh_ring_points": _thigh_ring_3d.round(6).tolist() if len(_thigh_ring_3d) > 0 else [],
+        "left_thigh_ring_vertex_indices": _thigh_ring_vertex_indices,
+        "left_thigh_ring_vertex_indices_unique": _thigh_ring_vertex_indices_unique,
         "left_thigh_landmark": vertices[_R_THIGH_IDXS].mean(axis=0).astype(float).round(6).tolist() if _thigh_valid else None,
         # Front body length — geodesic surface path for 3D visualization.
         # Subsampled to ≤200 points to keep JSON payload small.
@@ -2202,4 +2223,3 @@ def compute_measurements(person_rig: Dict, target_height_cm: Optional[float] = N
         },
         "schema": schema,
     }
-
