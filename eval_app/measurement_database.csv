@@ -7,11 +7,13 @@ ablilash,167.0,Male,Arm Length,54.0,53.94,53.43,0.06,0.57,-0.11,-1.06
 adil,169.0,Male,Arm Length,57.0,53.07,53.3,3.93,3.7,-6.89,-6.49
 adil2,169.0,Male,Arm Length,57.0,52.37,54.19,4.63,2.81,-8.12,-4.93
 avinash,179.0,Male,Arm Length,,57.86,56.87,,,,
+avinash last ,179.0,Male,Arm Length,,57.35,58.64,,,,
 avinash2nd,179.0,Male,Arm Length,,57.35,58.64,,,,
 mathen,180.0,Male,Arm Length,61.0,58.16,57.23,2.84,3.77,-4.66,-6.18
 mathensh,180.0,Male,Arm Length,,58.16,57.24,,,,
 navaneeth,178.0,Male,Arm Length,,57.07,57.77,,,,
 nihal,175.0,Male,Arm Length,57.0,56.93,55.99,0.07,1.01,-0.12,-1.77
+nihal new test ,174.0,Male,Arm Length,,59.75,57.67,,,,
 nihal2,175.0,Male,Arm Length,57.0,59.13,56.54,2.13,0.46,3.74,-0.81
 nihalsh,175.0,Male,Arm Length,,56.93,55.99,,,,
 safuan,173.0,Male,Arm Length,57.0,57.98,55.62,0.98,1.38,1.72,-2.42
@@ -29,11 +31,13 @@ ablilash,167.0,Male,Waist Girth,91.0,82.71,98.56,8.29,7.56,-9.11,8.31
 adil,169.0,Male,Waist Girth,75.0,79.07,83.66,4.07,8.66,5.43,11.55
 adil2,169.0,Male,Waist Girth,75.0,83.56,87.82,8.56,12.82,11.41,17.09
 avinash,179.0,Male,Waist Girth,88.0,87.23,95.54,0.77,7.54,-0.87,8.57
+avinash last ,179.0,Male,Waist Girth,,84.95,87.06,,,,
 avinash2nd,179.0,Male,Waist Girth,88.0,84.95,87.06,3.05,0.94,-3.47,-1.07
 mathen,180.0,Male,Waist Girth,111.0,99.41,116.3,11.59,5.3,-10.44,4.77
 mathensh,180.0,Male,Waist Girth,,99.41,116.3,,,,
 navaneeth,178.0,Male,Waist Girth,,87.04,89.11,,,,
 nihal,175.0,Male,Waist Girth,106.0,90.03,103.02,15.97,2.98,-15.07,-2.81
+nihal new test ,174.0,Male,Waist Girth,,93.12,94.61,,,,
 nihal2,175.0,Male,Waist Girth,106.0,94.11,105.31,11.89,0.69,-11.22,-0.65
 nihalsh,175.0,Male,Waist Girth,,90.03,103.02,,,,
 safuan,173.0,Male,Waist Girth,84.0,88.74,89.24,4.74,5.24,5.64,6.24
@@ -51,11 +55,13 @@ ablilash,167.0,Male,Bust / Chest Girth,97.0,99.78,102.04,2.78,5.04,2.87,5.2
 adil,169.0,Male,Bust / Chest Girth,87.0,94.16,89.33,7.16,2.33,8.23,2.68
 adil2,169.0,Male,Bust / Chest Girth,87.0,98.11,94.07,11.11,7.07,12.77,8.13
 avinash,179.0,Male,Bust / Chest Girth,90.0,104.02,100.99,14.02,10.99,15.58,12.21
+avinash last ,179.0,Male,Bust / Chest Girth,,102.51,94.26,,,,
 avinash2nd,179.0,Male,Bust / Chest Girth,90.0,102.51,94.26,12.51,4.26,13.9,4.73
 mathen,180.0,Male,Bust / Chest Girth,115.0,116.11,115.72,1.11,0.72,0.97,0.63
 mathensh,180.0,Male,Bust / Chest Girth,,116.11,115.72,,,,
 navaneeth,178.0,Male,Bust / Chest Girth,,102.19,94.69,,,,
 nihal,175.0,Male,Bust / Chest Girth,106.0,105.17,104.35,0.83,1.65,-0.78,-1.56
+nihal new test ,174.0,Male,Bust / Chest Girth,,110.78,99.18,,,,
 nihal2,175.0,Male,Bust / Chest Girth,106.0,109.54,108.12,3.54,2.12,3.34,2.0
 nihalsh,175.0,Male,Bust / Chest Girth,,105.17,104.35,,,,
 safuan,173.0,Male,Bust / Chest Girth,93.0,104.44,95.67,11.44,2.67,12.3,2.87
@@ -73,11 +79,13 @@ ablilash,167.0,Male,Hip Girth,105.0,47.66,108.77,57.34,3.77,-54.61,3.59
 adil,169.0,Male,Hip Girth,96.0,96.92,96.81,0.92,0.81,0.96,0.84
 adil2,169.0,Male,Hip Girth,96.0,101.02,100.57,5.02,4.57,5.23,4.76
 avinash,179.0,Male,Hip Girth,98.0,105.26,108.36,7.26,10.36,7.41,10.57
+avinash last ,179.0,Male,Hip Girth,,103.23,101.4,,,,
 avinash2nd,179.0,Male,Hip Girth,98.0,103.23,101.4,5.23,3.4,5.34,3.47
 mathen,180.0,Male,Hip Girth,124.0,78.03,126.73,45.97,2.73,-37.07,2.2
 mathensh,180.0,Male,Hip Girth,,78.03,126.73,,,,
 navaneeth,178.0,Male,Hip Girth,,50.16,103.01,,,,
 nihal,175.0,Male,Hip Girth,118.0,49.67,114.79,68.33,3.21,-57.91,-2.72
+nihal new test ,174.0,Male,Hip Girth,,51.36,107.02,,,,
 nihal2,175.0,Male,Hip Girth,117.0,33.08,115.97,83.92,1.03,-71.73,-0.88
 nihalsh,175.0,Male,Hip Girth,,49.67,114.79,,,,
 safuan,173.0,Male,Hip Girth,102.0,75.17,101.61,26.83,0.39,-26.3,-0.38
@@ -95,11 +103,13 @@ ablilash,167.0,Male,Inside Leg Height,71.0,76.78,78.43,5.78,7.43,8.14,10.46
 adil,169.0,Male,Inside Leg Height,76.0,77.79,79.68,1.79,3.68,2.36,4.84
 adil2,169.0,Male,Inside Leg Height,76.0,76.04,77.82,0.04,1.82,0.05,2.39
 avinash,179.0,Male,Inside Leg Height,77.0,83.47,83.47,6.47,6.47,8.4,8.4
+avinash last ,179.0,Male,Inside Leg Height,,81.83,84.56,,,,
 avinash2nd,179.0,Male,Inside Leg Height,77.0,81.83,84.56,4.83,7.56,6.27,9.82
 mathen,180.0,Male,Inside Leg Height,79.0,79.04,83.31,0.04,4.31,0.05,5.46
 mathensh,180.0,Male,Inside Leg Height,,79.04,83.31,,,,
 navaneeth,178.0,Male,Inside Leg Height,,81.81,84.23,,,,
 nihal,175.0,Male,Inside Leg Height,76.0,79.55,81.75,3.55,5.75,4.67,7.57
+nihal new test ,174.0,Male,Inside Leg Height,,77.27,81.23,,,,
 nihal2,175.0,Male,Inside Leg Height,76.0,77.42,83.51,1.42,7.51,1.87,9.88
 nihalsh,175.0,Male,Inside Leg Height,,79.55,81.75,,,,
 safuan,173.0,Male,Inside Leg Height,77.0,78.82,81.21,1.82,4.21,2.36,5.47
@@ -117,11 +127,13 @@ ablilash,167.0,Male,Shoulder → Crotch,66.0,62.03,66.77,3.97,0.77,-6.02,1.17
 adil,169.0,Male,Shoulder → Crotch,65.0,60.98,65.14,4.02,0.14,-6.18,0.22
 adil2,169.0,Male,Shoulder → Crotch,65.0,63.1,67.21,1.9,2.21,-2.92,3.4
 avinash,179.0,Male,Shoulder → Crotch,,66.69,68.44,,,,
+avinash last ,179.0,Male,Shoulder → Crotch,,64.26,66.8,,,,
 avinash2nd,179.0,Male,Shoulder → Crotch,,64.26,66.8,,,,
 mathen,180.0,Male,Shoulder → Crotch,72.0,69.29,71.95,2.71,0.05,-3.76,-0.07
 mathensh,180.0,Male,Shoulder → Crotch,,69.29,71.95,,,,
 navaneeth,178.0,Male,Shoulder → Crotch,,65.47,68.67,,,,
 nihal,175.0,Male,Shoulder → Crotch,77.0,66.49,70.01,10.51,6.99,-13.65,-9.08
+nihal new test ,174.0,Male,Shoulder → Crotch,,69.18,69.82,,,,
 nihal2,175.0,Male,Shoulder → Crotch,70.0,68.78,72.14,1.22,2.14,-1.74,3.06
 nihalsh,175.0,Male,Shoulder → Crotch,,66.49,70.01,,,,
 safuan,173.0,Male,Shoulder → Crotch,66.0,65.6,67.63,0.4,1.63,-0.61,2.47
@@ -139,11 +151,13 @@ ablilash,167.0,Male,Shoulder Width,43.0,42.45,42.44,0.55,0.56,-1.28,-1.3
 adil,169.0,Male,Shoulder Width,43.0,40.12,37.81,2.88,5.19,-6.7,-12.07
 adil2,169.0,Male,Shoulder Width,43.0,41.48,39.67,1.52,3.33,-3.53,-7.74
 avinash,179.0,Male,Shoulder Width,47.0,41.15,42.01,5.85,4.99,-12.45,-10.62
+avinash last ,179.0,Male,Shoulder Width,,45.74,41.72,,,,
 avinash2nd,179.0,Male,Shoulder Width,47.0,45.74,43.72,1.26,3.28,-2.68,-6.98
 mathen,180.0,Male,Shoulder Width,48.0,47.09,48.53,0.91,0.53,-1.9,1.1
 mathensh,180.0,Male,Shoulder Width,53.0,47.09,50.9,5.91,2.1,-11.15,-3.96
 navaneeth,178.0,Male,Shoulder Width,46.0,42.17,45.82,3.83,0.18,-8.33,-0.39
 nihal,175.0,Male,Shoulder Width,49.0,43.88,44.79,5.12,4.21,-10.45,-8.59
+nihal new test ,174.0,Male,Shoulder Width,,45.73,45.38,,,,
 nihal2,175.0,Male,Shoulder Width,49.0,46.98,47.26,2.02,1.74,-4.12,-3.55
 nihalsh,175.0,Male,Shoulder Width,49.0,43.88,47.41,5.12,1.59,-10.45,-3.24
 safuan,173.0,Male,Shoulder Width,43.0,42.36,41.39,0.64,1.61,-1.49,-3.74
@@ -161,11 +175,13 @@ ablilash,167.0,Male,Thigh Girth,60.0,54.59,63.03,5.41,3.03,-9.02,5.05
 adil,169.0,Male,Thigh Girth,56.0,51.1,58.97,4.9,2.97,-8.75,5.3
 adil2,169.0,Male,Thigh Girth,56.0,53.46,59.43,2.54,3.43,-4.54,6.12
 avinash,179.0,Male,Thigh Girth,,55.19,64.14,,,,
+avinash last ,179.0,Male,Thigh Girth,,54.67,60.6,,,,
 avinash2nd,179.0,Male,Thigh Girth,,54.67,59.62,,,,
 mathen,180.0,Male,Thigh Girth,71.0,65.25,74.44,5.75,3.44,-8.1,4.85
 mathensh,180.0,Male,Thigh Girth,,65.25,148.54,,,,
 navaneeth,178.0,Male,Thigh Girth,,56.26,62.61,,,,
 nihal,175.0,Male,Thigh Girth,71.0,56.08,67.58,14.92,3.42,-21.01,-4.82
+nihal new test ,174.0,Male,Thigh Girth,,57.82,63.51,,,,
 nihal2,175.0,Male,Thigh Girth,71.0,59.68,66.78,11.32,4.22,-15.94,-5.94
 nihalsh,175.0,Male,Thigh Girth,,56.08,68.7,,,,
 safuan,173.0,Male,Thigh Girth,58.0,58.68,61.49,0.68,3.49,1.17,6.02

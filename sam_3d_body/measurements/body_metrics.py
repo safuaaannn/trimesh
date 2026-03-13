@@ -1925,7 +1925,7 @@ def compute_measurements(person_rig: Dict, target_height_cm: Optional[float] = N
     #   • back arc (max-X → min-X via posterior Z) = shoulder breadth surface path
     _SHOULDER_RING_V: int = 7953  # kept for landmarks export
     _L_SHOULDER_V: int    = 7952  # left acromion surface vertex
-    _R_SHOULDER_V: int    = 6804  # right acromion surface vertex
+    _R_SHOULDER_V: int    = 6615  # right acromion surface vertex
     _shoulder_ring_3d:     np.ndarray      = np.zeros((0, 3), dtype=float)
     _shoulder_breadth_arc: np.ndarray      = np.zeros((0, 3), dtype=float)
     shoulder_width:        Optional[float] = None
@@ -2154,10 +2154,13 @@ def compute_measurements(person_rig: Dict, target_height_cm: Optional[float] = N
         "inseam_heel_landmark": _landmark_to_list(_left_heel_pt),
         # Arm length waypoints for 3D visualization (ordered shoulder → wrist)
         "arm_waypoints": [vertices[i].astype(float).round(6).tolist() for i in _ARM_WAYPOINTS] if _arm_valid else [],
-        # Shoulder breadth — back arc of the shoulder ring (horizontal cross-section)
-        "shoulder_breadth_path": _shoulder_breadth_arc.round(6).tolist() if len(_shoulder_breadth_arc) > 0 else [],
-        "shoulder_left_landmark":  _shoulder_breadth_arc[-1].round(6).tolist() if len(_shoulder_breadth_arc) > 0 else None,
-        "shoulder_right_landmark": _shoulder_breadth_arc[0].round(6).tolist()  if len(_shoulder_breadth_arc) > 0 else None,
+        # Shoulder-level ring — horizontal cross-section through vertex 7953
+        "shoulder_ring_points": _shoulder_ring_3d.round(6).tolist() if len(_shoulder_ring_3d) > 0 else [],
+        "shoulder_ring_landmark": vertices[_SHOULDER_RING_V].astype(float).round(6).tolist() if _SHOULDER_RING_V < vertices.shape[0] else None,
+        # Shoulder breadth back arc — the measured portion of the ring
+        "shoulder_breadth_arc": _shoulder_breadth_arc.round(6).tolist() if len(_shoulder_breadth_arc) > 0 else [],
+        "shoulder_left_landmark": vertices[_L_SHOULDER_V].astype(float).round(6).tolist() if _L_SHOULDER_V < vertices.shape[0] else None,
+        "shoulder_right_landmark": vertices[_R_SHOULDER_V].astype(float).round(6).tolist() if _R_SHOULDER_V < vertices.shape[0] else None,
         "lateral_malleolus_left": _landmark_to_list(left_ankle),
         "lateral_malleolus_right": _landmark_to_list(right_ankle),
         # Chest ring visualization data (SMPLX-style)
@@ -2196,9 +2199,6 @@ def compute_measurements(person_rig: Dict, target_height_cm: Optional[float] = N
         "neck_top_landmark": vertices[_NECK_TOP_VERTEX_IDX].astype(float).round(6).tolist() if _sc_valid else None,
         # belly_button shown as mid-path anchor dot (confirmed front vertex)
         "front_waist_midline_landmark": vertices[_BELLY_BUTTON].astype(float).round(6).tolist() if _sc_valid else None,
-        # Shoulder-level ring — horizontal cross-section through vertex 7953
-        "shoulder_ring_points": _shoulder_ring_3d.round(6).tolist() if len(_shoulder_ring_3d) > 0 else [],
-        "shoulder_ring_landmark": vertices[_SHOULDER_RING_V].astype(float).round(6).tolist() if _SHOULDER_RING_V < vertices.shape[0] else None,
     }
 
     schema = {
