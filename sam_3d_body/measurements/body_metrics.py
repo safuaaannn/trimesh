@@ -1137,27 +1137,43 @@ def _thigh_circumference_smplx_style(
     isolation_margin_m: float = 0.03,
     min_isolation_radius_m: float = 0.12,
     plane_anchor_idx: Optional[int] = None,
+    ring_vertex_indices: Optional[List[int]] = None,
 ):
     """
     Compute thigh circumference (raw metres) for ONE side.
 
-    Uses the same _trimesh_chest_contour approach: slice mesh, stitch all
-    segments into contours, pick the contour whose centroid is nearest to
-    the thigh landmark centre. No UV-gate pre-filtering needed — the two
-    legs form separate contours at the anchor height and nearest-centroid
-    selection picks the correct one.
+    Uses hardcoded ring vertex indices (ordered loop around the thigh).
+    The ring is flattened to a constant Y (anchor vertex height) so it
+    is perfectly horizontal — no tilt from vertex Y-zigzag.
 
     Returns (girth_m, ring_3d) — same contract as chest/waist/hip.
     """
     vertices = np.asarray(vertices, dtype=float)
-    knee_joint = np.asarray(knee_joint, dtype=float) if knee_joint is not None else None
 
-    # Thigh centre = centroid of landmark vertices
+    # ── PRIMARY PATH: hardcoded vertex ring ──────────────────────────────
+    if ring_vertex_indices is not None and len(ring_vertex_indices) >= 3:
+        valid = all(i < vertices.shape[0] for i in ring_vertex_indices)
+        if valid:
+            # Anchor Y for flattening (use plane_anchor_idx or first ring vertex)
+            if plane_anchor_idx is not None and plane_anchor_idx < vertices.shape[0]:
+                flat_y = float(vertices[plane_anchor_idx][1])
+            else:
+                flat_y = float(vertices[ring_vertex_indices[0]][1])
+
+            ring_pts = vertices[np.array(ring_vertex_indices, dtype=int)].copy()
+            ring_pts[:, 1] = flat_y  # flatten to constant Y — perfectly horizontal
+
+            # Closed-ring perimeter
+            diffs = np.diff(ring_pts, axis=0)
+            girth_m = float(np.linalg.norm(diffs, axis=1).sum())
+            girth_m += float(np.linalg.norm(ring_pts[-1] - ring_pts[0]))
+            return girth_m, ring_pts
+
+    # ── FALLBACK: trimesh plane intersection (legacy) ────────────────────
+    knee_joint = np.asarray(knee_joint, dtype=float) if knee_joint is not None else None
     landmark_pts = vertices[np.asarray(landmark_indices, dtype=int)]
     thigh_center = landmark_pts.mean(axis=0)
 
-    # Plane origin: use hardcoded anchor vertex (below crotch, legs separated),
-    # otherwise fall back to 4% offset from landmark centroid toward knee.
     if plane_anchor_idx is not None and plane_anchor_idx < vertices.shape[0]:
         plane_origin = vertices[plane_anchor_idx].copy()
     else:
@@ -1167,18 +1183,10 @@ def _thigh_circumference_smplx_style(
         else:
             plane_origin[1] = float(thigh_center[1] - 0.10)
 
-    # Horizontal cut (world-Y normal)
     plane_normal = np.array([0.0, 1.0, 0.0])
-
-    # Use thigh_center at the cut-plane Y for centroid matching
     thigh_center_at_cut = thigh_center.copy()
     thigh_center_at_cut[1] = plane_origin[1]
 
-    # ── TRIMESH PATH: stitch all, pick nearest centroid with min-girth filter ──
-    # Unlike chest/waist/hip, the thigh cut plane has multiple small contours
-    # (groin fragments, inner-leg edges) whose centroids can be closer to the
-    # landmark than the actual thigh ring. We filter out contours < 0.20 m
-    # girth before selecting the nearest one.
     if faces is not None:
         try:
             import trimesh as _trimesh
@@ -1192,11 +1200,9 @@ def _thigh_circumference_smplx_style(
                     for c in _contours:
                         if len(c) < 5:
                             continue
-                        # Compute girth of this contour
                         _d = np.diff(c, axis=0)
                         _g = float(np.linalg.norm(_d, axis=1).sum())
                         _g += float(np.linalg.norm(c[-1] - c[0]))
-                        # Skip tiny fragments (< 20 cm)
                         if _g < 0.20:
                             continue
                         d = float(np.linalg.norm(c.mean(axis=0) - thigh_center_at_cut))
@@ -1213,7 +1219,7 @@ def _thigh_circumference_smplx_style(
         except Exception:
             pass
 
-    # ── FALLBACK: slab + XZ gate from thigh centre + convex hull ──────────
+    # ── FALLBACK 2: slab + XZ gate + convex hull ─────────────────────────
     pts: Optional[np.ndarray] = None
     t = thickness
     for _ in range(3):
@@ -1225,7 +1231,6 @@ def _thigh_circumference_smplx_style(
     if pts is None or len(pts) == 0:
         return 0.0, np.zeros((0, 3), dtype=float)
 
-    # XZ gate: keep points near thigh centre
     center_xz = np.array([thigh_center[0], thigh_center[2]])
     dist_xz = np.linalg.norm(pts[:, [0, 2]] - center_xz, axis=1)
     pts = pts[dist_xz <= 0.15]
@@ -1260,12 +1265,15 @@ def _thigh_girth_both_sides(
     thickness: float = 0.020,
     left_plane_anchor_idx: Optional[int] = None,
     right_plane_anchor_idx: Optional[int] = None,
+    left_ring_vertex_indices: Optional[List[int]] = None,
+    right_ring_vertex_indices: Optional[List[int]] = None,
 ):
     """Compute right thigh girth only and return (girth_m, right_ring_3d)."""
     right_girth, right_ring = _thigh_circumference_smplx_style(
         vertices, faces, right_landmark_indices,
         right_hip_joint, right_knee_joint, spine3_joint, thickness,
         plane_anchor_idx=right_plane_anchor_idx,
+        ring_vertex_indices=right_ring_vertex_indices,
     )
     return right_girth, right_ring
 
@@ -1570,6 +1578,10 @@ def compute_measurements(person_rig: Dict, target_height_cm: Optional[float] = N
     # Heel vertices — hardcoded from find_heel_vertex() debug run.
     _L_HEEL_IDX: int = 12415
     _R_HEEL_IDX: int = 17865
+    # Foot sole bottom vertices — lowest Y vertex in each foot's heel region.
+    # Used for inseam: crotch_Y − min(L_sole_Y, R_sole_Y).
+    _L_SOLE_IDX: int = 12626   # left foot sole bottom (heel region)
+    _R_SOLE_IDX: int = 17806   # right foot sole bottom (heel region)
 
     # Waist landmark vertex indices.
     # _BELLY_BUTTON      (5711) = navel front surface vertex.
@@ -1592,6 +1604,28 @@ def compute_measurements(person_rig: Dict, target_height_cm: Optional[float] = N
     # desired cut height (identified via debug print, 4 % groin→knee offset).
     _L_THIGH_RING_IDX: int = 16467   # left thigh ring anchor
     _R_THIGH_RING_IDX: int = 11279   # right thigh ring anchor (same as landmark)
+    # Hardcoded ring vertex loops (ordered by angle around the thigh centre).
+    # These are the actual mesh vertices closest to the horizontal cut plane
+    # at the anchor Y height, forming a closed ring around each thigh.
+    # Y is flattened to anchor Y at measurement time → perfectly horizontal ring.
+    # Full vertex rings ordered by angle around thigh centroid.
+    # Each ring is a closed loop of actual mesh vertices; Y is flattened
+    # to the anchor vertex height at measurement time → perfectly horizontal.
+    # 24 vertices, max angular gap ~22°.
+    _L_THIGH_RING_VERTS: List[int] = [
+        16470, 16471, 16472, 16473, 16474, 16475,   # posterior  (-175° to -101°)
+        16451, 16452, 16453, 16454, 16431, 16432,   # back/inner (-88° to -26°)
+        16408, 16409, 16435, 16436, 16437, 16438,   # medial/front (-13° to +79°)
+        16439, 16465, 16466, 16467, 16468, 16469,   # lateral    (+94° to +169°)
+    ]
+    # 25 vertices, max angular gap ~18°.
+    _R_THIGH_RING_VERTS: List[int] = [
+        11259, 11234, 11235, 11237, 11263, 11264,    # posterior  (-161° to -106°)
+        11265, 11266, 11292, 11293, 11294, 11295,    # back/inner (-93° to -22°)
+        11296, 11297, 11298, 11299, 11300, 11301,    # medial/front (-7° to +65°)
+        11302, 11303, 11279, 11280, 11281, 11257,    # lateral    (+79° to +157°)
+        11236,                                        # wrap       (+178°)
+    ]
     _thigh_valid = (
         all(i < vertices.shape[0] for i in _L_THIGH_IDXS)
         and all(i < vertices.shape[0] for i in _R_THIGH_IDXS)
@@ -1674,22 +1708,27 @@ def compute_measurements(person_rig: Dict, target_height_cm: Optional[float] = N
     # Crotch point — hardcoded vertex (stable, no scan needed)
     crotch_point = vertices[_CROTCH_VERTEX_IDX].copy() if _CROTCH_VERTEX_IDX < vertices.shape[0] else None
 
-    # Heel points — Option A (hardcoded vertex), B (ankle projected), C (vertical)
-    if _L_HEEL_IDX is not None and _L_HEEL_IDX < vertices.shape[0]:
-        _left_heel_pt = vertices[_L_HEEL_IDX].copy()
-        _heel_source  = "heel_vertex"
-    elif left_ankle is not None:
-        _left_heel_pt = np.array([left_ankle[0], ground_y, left_ankle[2]], dtype=float)
-        _heel_source  = "ankle_projected"
+    # Foot sole bottom — use the lower of left/right sole vertices.
+    # These are the lowest mesh vertices in each foot's heel region.
+    _l_sole_valid = _L_SOLE_IDX < vertices.shape[0]
+    _r_sole_valid = _R_SOLE_IDX < vertices.shape[0]
+    if _l_sole_valid and _r_sole_valid:
+        _l_sole_y = float(vertices[_L_SOLE_IDX][1])
+        _r_sole_y = float(vertices[_R_SOLE_IDX][1])
+        if _l_sole_y <= _r_sole_y:
+            _inseam_foot_pt = vertices[_L_SOLE_IDX].copy()
+        else:
+            _inseam_foot_pt = vertices[_R_SOLE_IDX].copy()
+    elif _l_sole_valid:
+        _inseam_foot_pt = vertices[_L_SOLE_IDX].copy()
+    elif _r_sole_valid:
+        _inseam_foot_pt = vertices[_R_SOLE_IDX].copy()
     else:
-        _left_heel_pt = np.array([crotch_point[0] if crotch_point is not None else 0.0,
-                                   ground_y,
-                                   crotch_point[2] if crotch_point is not None else 0.0], dtype=float)
-        _heel_source  = "vertical_fallback"
+        _inseam_foot_pt = np.array([0.0, ground_y, 0.0], dtype=float)
 
-    # Inseam — Method A (projected along leg axis): best for posed figures
+    # Inseam — vertical drop from crotch to the lowest foot sole vertex.
     if crotch_point is not None:
-        inside_leg = _inseam_projected(crotch_point, _left_heel_pt, left_knee)
+        inside_leg = float(crotch_point[1] - _inseam_foot_pt[1])
     else:
         inside_leg = hip_level_y - ground_y
 
@@ -2084,6 +2123,8 @@ def compute_measurements(person_rig: Dict, target_height_cm: Optional[float] = N
             thickness=0.020,
             left_plane_anchor_idx=_L_THIGH_RING_IDX,
             right_plane_anchor_idx=_R_THIGH_RING_IDX,
+            left_ring_vertex_indices=_L_THIGH_RING_VERTS,
+            right_ring_vertex_indices=_R_THIGH_RING_VERTS,
         )
 
     _thigh_ring_vertex_indices: List[int] = []
@@ -2149,9 +2190,9 @@ def compute_measurements(person_rig: Dict, target_height_cm: Optional[float] = N
         "waist_level": round(float(waist_level_y), 5),
         "hip_level": round(float(hip_level_y), 5),
         "crotch": _landmark_to_list(crotch_point),
-        # Inseam endpoints for 3D visualization
+        # Inseam endpoints for 3D visualization (crotch → foot sole bottom)
         "inseam_crotch_landmark": _landmark_to_list(crotch_point),
-        "inseam_heel_landmark": _landmark_to_list(_left_heel_pt),
+        "inseam_heel_landmark": _landmark_to_list(_inseam_foot_pt),
         # Arm length waypoints for 3D visualization (ordered shoulder → wrist)
         "arm_waypoints": [vertices[i].astype(float).round(6).tolist() for i in _ARM_WAYPOINTS] if _arm_valid else [],
         # Shoulder-level ring — horizontal cross-section through vertex 7953
